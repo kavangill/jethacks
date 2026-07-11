@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Overlay</title>
+  <style>
+    :root {
+      /* cadgod palette: island rgb(0.13,0.13,0.15), 10% white border */
+      --island-bg: rgb(33, 33, 38);
+      --island-border: rgba(255, 255, 255, 0.10);
+      --text: rgba(255, 255, 255, 0.85);   /* labelColor */
+      --muted: rgba(255, 255, 255, 0.55);  /* secondaryLabelColor */
+      --head: #ffffff;
+      --accent: rgba(255, 255, 255, 0.55); /* white 0.55 marker accent */
+      --teal: #40c8e0;                     /* systemTealColor */
+      --red: #ff453a;                      /* systemRedColor */
+      --mono: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      overflow: hidden;
+      height: 100%;
+    }
+
+    /* Bar pinned to the bottom of the fixed-size window; panel grows
+       upward above it. */
+    #root {
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      height: 100%;
+      box-sizing: border-box;
+    }
+
+    .island {
+      background: var(--island-bg);
+      border: 1px solid var(--island-border);
+      border-radius: 11px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    }
+
+    /* --- output panel ------------------------------------------------ */
+    #panel {
+      height: 0;
+      margin-bottom: 0;
+      opacity: 0;
+      overflow: hidden;
+      transition: height 0.16s ease-out, opacity 0.16s ease-out, margin-bottom 0.16s ease-out;
+      box-sizing: border-box;
+    }
+    #panel.open {
+      opacity: 1;
+      margin-bottom: 6px;
+    }
+    #scroll {
+      height: 100%;
+      overflow-y: auto;
+      padding: 6px 10px;
+      box-sizing: border-box;
+    }
+    #scroll::-webkit-scrollbar { width: 6px; }
+    #scroll::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 3px;
+    }
+
+    /* --- markdown (mirrors cadgod renderMarkdown) --------------------- */
+    #content {
+      font-family: var(--mono);
+      font-size: 11.5px;
+      line-height: 1.75;
+      color: var(--text);
+      word-wrap: break-word;
+    }
+    #content .h1 { font-size: 15px;   font-weight: 700; color: var(--head); margin-top: 14px; margin-bottom: 6px; }
+    #content .h2 { font-size: 13.5px; font-weight: 700; color: var(--head); margin-top: 14px; margin-bottom: 6px; }
+    #content .h3 { font-size: 12.5px; font-weight: 700; color: var(--head); margin-top: 14px; margin-bottom: 6px; }
+    #content .line { margin-bottom: 6px; white-space: pre-wrap; }
+    #content .muted { color: var(--muted); }
+    #content .prompt { color: var(--teal); font-weight: 600; margin-top: 12px; margin-bottom: 8px; }
+    #content .error { color: var(--red); }
+    #content .marker { color: var(--accent); }
+    #content .hr {
+      border-top: 1px solid rgba(255, 255, 255, 0.15);
+      margin: 10px 0;
+    }
+    #content code {
+      font-family: var(--mono);
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+      padding: 0 3px;
+    }
+    #content b { color: var(--head); }
+
+    /* --- input bar (cadgod input island: 42px, 8px pad, 6px gaps) ----- */
+    #bar {
+      -webkit-app-region: drag;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 42px;
+      flex-shrink: 0;
+      box-sizing: border-box;
+      padding: 0 8px;
+    }
+
+    input {
+      -webkit-app-region: no-drag;
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+    input::placeholder { color: var(--muted); }
+    input:disabled { color: var(--muted); }
+
+    /* red borderless ✕ — same as cadgod's close button */
+    #kill {
+      -webkit-app-region: no-drag;
+      background: none;
+      border: none;
+      padding: 0 4px;
+      cursor: pointer;
+      color: var(--red);
+      font-size: 20px;
+      font-weight: 700;
+      font-family: var(--mono);
+      line-height: 1;
+    }
+    #kill:hover { opacity: 0.75; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div id="panel" class="island">
+      <div id="scroll"><div id="content"></div></div>
+    </div>
+    <div id="bar" class="island">
+      <button id="kill" title="Quit">✕</button>
+      <input id="prompt" type="text" placeholder="Type something…" autofocus />
+    </div>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

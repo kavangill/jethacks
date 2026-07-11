@@ -1,0 +1,12 @@
+{
+  "name": "overlay-app",
+  "version": "1.0.0",
+  "description": "A simple always-on-top overlay bar with a textbox",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^32.0.0"
+  }
+}
