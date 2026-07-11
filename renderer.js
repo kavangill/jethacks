@@ -143,8 +143,16 @@ const mic = document.getElementById('mic');
 let recorder = null;
 let recChunks = [];
 let haloBusy = false;
+let cancelNext = false; // set by onHaloListenCancel: discard the next recording, don't send it
+let currentStatus = 'idle';
+
+// Clicking the mic while the agent is thinking/acting/speaking cancels the
+// whole run instead of starting a new recording (mousedown already guards
+// against starting a second recording while haloBusy is true).
+const BUSY_STATES = ['thinking', 'acting', 'transcribing', 'speaking'];
 
 function setMicState(state) {
+  currentStatus = state;
   mic.className = state === 'idle' ? '' : state;
 }
 
@@ -166,6 +174,7 @@ async function startRecording(mode) {
       stream.getTracks().forEach((t) => t.stop());
       const blob = new Blob(recChunks, { type: 'audio/webm' });
       recorder = null;
+      if (cancelNext) { cancelNext = false; setMicState('idle'); return; } // Escape cancelled it
       if (blob.size < 2000) { setMicState('idle'); return; } // accidental tap
       haloBusy = true;
       setMicState('transcribing');
@@ -192,9 +201,25 @@ mic.addEventListener('mousedown', () => startRecording('voice'));
 mic.addEventListener('mouseup', stopRecording);
 mic.addEventListener('mouseleave', stopRecording);
 
-// Space-toggled teaching mode, driven from main's global shortcut.
+// A click while the agent is busy (not recording) cancels the run instead
+// of starting a new one — "stop prompt, end thinking".
+mic.addEventListener('click', () => {
+  if (BUSY_STATES.includes(currentStatus)) window.overlay.haloAbort();
+});
+
+// ⌥⌘Space hold-to-talk, driven from main's uiohook chord detection. Starting
+// a recording always means main already cancelled/superseded any run in
+// progress (barge-in), so by the time 'listen-start' arrives we're clear to
+// record fresh input.
 window.overlay.onHaloListenStart(() => startRecording('teach'));
 window.overlay.onHaloListenStop(() => stopRecording());
+
+// Escape (or any other explicit cancel) discards the in-progress recording
+// instead of transcribing it.
+window.overlay.onHaloListenCancel(() => {
+  cancelNext = true;
+  stopRecording();
+});
 
 window.overlay.onHaloTranscript((t) => {
   haloLine(`<div class="line prompt">🎙 ${escapeHtml(t)}</div>`);
@@ -228,16 +253,30 @@ window.overlay.onHaloThinking((text) => {
 // TTS mp3s from main, played in order.
 const audioQueue = [];
 let playing = false;
+let currentAudioEl = null;
 function playNext() {
   if (playing || audioQueue.length === 0) return;
   playing = true;
-  const el = new Audio('data:audio/mpeg;base64,' + audioQueue.shift());
-  el.onended = el.onerror = () => { playing = false; playNext(); };
-  el.play().catch(() => { playing = false; playNext(); });
+  currentAudioEl = new Audio('data:audio/mpeg;base64,' + audioQueue.shift());
+  currentAudioEl.onended = currentAudioEl.onerror = () => { playing = false; currentAudioEl = null; playNext(); };
+  currentAudioEl.play().catch(() => { playing = false; currentAudioEl = null; playNext(); });
 }
 window.overlay.onHaloAudio((b64) => {
   audioQueue.push(b64);
   playNext();
+});
+
+// Barge-in / Escape / cancel: wipe anything queued or currently playing so
+// no stale speech continues after the student interrupts.
+window.overlay.onHaloAudioStop(() => {
+  audioQueue.length = 0;
+  playing = false;
+  if (currentAudioEl) {
+    currentAudioEl.onended = currentAudioEl.onerror = null;
+    currentAudioEl.pause();
+    currentAudioEl.src = '';
+    currentAudioEl = null;
+  }
 });
 
 // ---------------------------------------------------------------- click-through

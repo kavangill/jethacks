@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld('overlay', {
     ipcRenderer.invoke('halo-teach', audioArrayBuffer, mimeType),
   onHaloListenStart: (cb) => ipcRenderer.on('halo-listen-start', () => cb()),
   onHaloListenStop: (cb) => ipcRenderer.on('halo-listen-stop', () => cb()),
+  onHaloListenCancel: (cb) => ipcRenderer.on('halo-listen-cancel', () => cb()),
   onHaloShot: (cb) => ipcRenderer.on('halo-shot', (_e, b64) => cb(b64)),
   onHaloThinking: (cb) => ipcRenderer.on('halo-thinking', (_e, text) => cb(text)),
+  onHaloAudioStop: (cb) => ipcRenderer.on('halo-audio-stop', () => cb()),
 });

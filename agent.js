@@ -129,7 +129,7 @@ const EXECUTORS = {
 //   'log'     -> console-style line for the panel
 //   'speak'   -> mid-task narration text (caller TTSes it)
 // abortState.aborted (set by the Escape kill switch) stops before each step.
-async function runAgent(task, { emit, abortState, firstShot, circled }) {
+async function runAgent(task, { emit, abortState, signal, firstShot, circled }) {
   const client = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY,
     timeout: API_TIMEOUT_MS,
@@ -155,13 +155,17 @@ async function runAgent(task, { emit, abortState, firstShot, circled }) {
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     if (abortState.aborted) return null;
 
-    const response = await client.messages.create({
-      model,
-      max_tokens: 2000,
-      system: sys,
-      tools: TOOLS,
-      messages,
-    });
+    let response;
+    try {
+      response = await client.messages.create(
+        { model, max_tokens: 2000, system: sys, tools: TOOLS, messages },
+        { signal }
+      );
+    } catch (err) {
+      if (abortState.aborted || signal?.aborted) return null; // barge-in cancelled the request
+      throw err;
+    }
+    if (abortState.aborted) return null; // superseded while the request was in flight
     messages.push({ role: 'assistant', content: response.content });
 
     const toolUses = response.content.filter((b) => b.type === 'tool_use');
@@ -216,18 +220,18 @@ async function runAgent(task, { emit, abortState, firstShot, circled }) {
 
   // Step cap reached mid-lesson: ask for a closing summary with tools
   // disabled so the student gets a graceful wrap-up instead of a cutoff.
+  if (abortState.aborted) return null;
   try {
     // Append to the trailing tool_result turn (roles must alternate).
     messages[messages.length - 1].content.push({
       type: 'text',
       text: 'You have reached your pointing-step limit. Give the student your final spoken wrap-up now — plain text, no tools.',
     });
-    const closing = await client.messages.create({
-      model,
-      max_tokens: 600,
-      system: sys,
-      messages,
-    });
+    const closing = await client.messages.create(
+      { model, max_tokens: 600, system: sys, messages },
+      { signal }
+    );
+    if (abortState.aborted) return null;
     const text = closing.content
       .filter((b) => b.type === 'text')
       .map((b) => b.text)

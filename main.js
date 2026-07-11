@@ -10,6 +10,7 @@ const {
 const path = require('node:path');
 const fs = require('node:fs');
 const https = require('node:https');
+const { uIOhook, UiohookKey } = require('uiohook-napi');
 
 // --- load .env (same key/model as the cadgod project) -----------------
 function loadEnv() {
@@ -206,7 +207,15 @@ const { transcribe, tts } = require('./voice');
 const { captureScreen, screenshotDims } = require('./screen');
 
 let agentActive = false;
-const abortState = { aborted: false };
+
+// Each run gets its own abort flag + Anthropic AbortController, and a
+// generation number. Barge-in supersedes the in-flight run rather than
+// mutating shared state (which would race a new run against an old one's
+// straggling awaits) — stale runs are silenced by the generation check,
+// and their network calls are actually cancelled via the controller.
+let runGeneration = 0;
+let currentAbort = null;
+let currentController = null;
 
 function haloSend(channel, ...args) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
@@ -269,52 +278,81 @@ function annotateShot(shot, points) {
   });
 }
 
-// --- spacebar listening mode ------------------------------------------------
-// Space toggles: mic on + amber gesture trail → speak and circle something →
-// Space again → transcribe + annotated screenshot → teacher explains.
+// --- hold-to-talk listening mode --------------------------------------------
+// Hold ⌥⌘Space (or the mic button): mic on + amber gesture trail → speak and
+// optionally circle something → release → transcribe + annotated screenshot
+// → teacher explains. Starting a recording always supersedes whatever the
+// agent is currently doing (barge-in): output is cut and generation bumped
+// so the interrupted run can never re-surface stale audio or status.
 let listening = false;
 
-function toggleListening() {
-  if (agentActive) return;
-  listening = !listening;
-  if (listening) {
-    startTrail('user');
-    haloSend('halo-status', 'recording');
-    haloSend('halo-listen-start');
-  } else {
-    stopTrail();
-    haloSend('halo-status', 'transcribing');
-    haloSend('halo-listen-stop'); // renderer stops the recorder → halo-teach
-  }
+function cancelCurrentRun() {
+  runGeneration++; // any in-flight run's emits/finally are now stale
+  if (currentController) currentController.abort();
+  if (currentAbort) currentAbort.aborted = true;
+  haloSend('halo-audio-stop');
 }
 
-async function speakOut(text) {
+function startListening() {
+  if (listening) return;
+  cancelCurrentRun(); // barge-in: cuts off any current speech/thinking
+  listening = true;
+  startTrail('user');
+  haloSend('halo-status', 'recording');
+  haloSend('halo-listen-start');
+}
+
+function stopListening() {
+  if (!listening) return;
+  listening = false;
+  stopTrail();
+  haloSend('halo-status', 'transcribing');
+  haloSend('halo-listen-stop'); // renderer stops the recorder → halo-teach
+}
+
+// Escape / mic-click-while-busy: stop everything and return to idle,
+// discarding (not processing) any recording in progress.
+function cancelEverything(reason) {
+  cancelCurrentRun();
+  if (listening) {
+    listening = false;
+    stopTrail();
+    haloSend('halo-listen-cancel'); // renderer discards the recorder's audio
+  }
+  agentActive = false;
+  haloSend('halo-log', `aborted (${reason})`);
+  haloSend('halo-status', 'idle');
+}
+
+async function speakOut(text, myAbort, myGen) {
   try {
     const mp3 = await tts(text);
+    if (myAbort.aborted || myGen !== runGeneration) return; // superseded
     haloSend('halo-audio', mp3.toString('base64'));
   } catch (err) {
+    if (myAbort.aborted || myGen !== runGeneration) return;
     console.error('[halo] TTS failed:', err.message);
     haloSend('halo-log', `TTS failed: ${err.message}`);
   }
 }
 
 async function runHaloTask(task, opts = {}) {
-  if (agentActive) return;
+  const myAbort = { aborted: false };
+  const myController = new AbortController();
+  const myGen = ++runGeneration;
+  currentAbort = myAbort;
+  currentController = myController;
   agentActive = true;
-  abortState.aborted = false;
   win.setIgnoreMouseEvents(true, { forward: true });
   startTrail('ai'); // blue glow so the student can follow the pointer
 
-  // Kill switch: Escape aborts the loop from anywhere, mid-demo.
-  globalShortcut.register('Escape', () => {
-    abortState.aborted = true;
-    haloSend('halo-log', 'aborted (Escape)');
-  });
+  const stale = () => myGen !== runGeneration;
 
   const emit = (event, data) => {
+    if (stale()) return;
     if (event === 'status') haloSend('halo-status', data);
     else if (event === 'log') haloSend('halo-log', data);
-    else if (event === 'speak') speakOut(data);
+    else if (event === 'speak') speakOut(data, myAbort, myGen);
     else if (event === 'shot') haloSend('halo-shot', data);
     else if (event === 'thinking') haloSend('halo-thinking', data);
   };
@@ -323,34 +361,37 @@ async function runHaloTask(task, opts = {}) {
     haloSend('halo-status', 'thinking');
     const finalText = await runAgent(task, {
       emit,
-      abortState,
+      abortState: myAbort,
+      signal: myController.signal,
       firstShot: opts.firstShot,
       circled: opts.circled,
     });
-    if (abortState.aborted) {
-      haloSend('halo-status', 'idle');
-      return;
-    }
+    if (myAbort.aborted || stale()) return;
     console.log(`[halo] final: ${finalText}`);
     haloSend('halo-log', `✓ ${finalText}`);
     haloSend('halo-status', 'speaking');
-    await speakOut(finalText);
+    await speakOut(finalText, myAbort, myGen);
   } catch (err) {
+    if (stale()) return;
     console.error('[halo] agent error:', err);
     haloSend('halo-error', err.message);
-    await speakOut('Sorry, something went wrong with that.');
+    await speakOut('Sorry, something went wrong with that.', myAbort, myGen);
   } finally {
-    globalShortcut.unregister('Escape');
-    stopTrail();
-    agentActive = false;
-    haloSend('halo-status', 'idle');
+    if (!stale()) {
+      agentActive = false;
+      // A barge-in may already have started a new recording (listening
+      // true) that owns the trail/status now — don't clobber it.
+      if (!listening) {
+        stopTrail();
+        haloSend('halo-status', 'idle');
+      }
+    }
   }
 }
 
-// Teach path: Space-toggled recording. The renderer sends the audio here
-// after the second Space press; the gesture path is already in userPath.
+// Teach path: hold-to-talk recording. The renderer sends the audio here
+// after release; the gesture path is already in userPath.
 ipcMain.handle('halo-teach', async (_event, audioArrayBuffer, mimeType) => {
-  if (agentActive) return { error: 'busy' };
   try {
     haloSend('halo-status', 'transcribing');
     const task = await transcribe(Buffer.from(audioArrayBuffer), mimeType);
@@ -373,7 +414,6 @@ ipcMain.handle('halo-teach', async (_event, audioArrayBuffer, mimeType) => {
 // Voice path: renderer records webm while the mic button is held, sends it
 // here on release; we transcribe then hand the text to the agent.
 ipcMain.handle('halo-voice', async (_event, audioArrayBuffer, mimeType) => {
-  if (agentActive) return { error: 'busy' };
   try {
     haloSend('halo-status', 'transcribing');
     const task = await transcribe(Buffer.from(audioArrayBuffer), mimeType);
@@ -392,14 +432,15 @@ ipcMain.handle('halo-voice', async (_event, audioArrayBuffer, mimeType) => {
 
 // Text path for testing/demo fallback: "/do <task>" in the prompt box.
 ipcMain.handle('halo-task', async (_event, task) => {
-  if (agentActive) return { error: 'busy' };
   haloSend('halo-transcript', task);
   runHaloTask(task);
   return { task };
 });
 
+// Mic-click-while-busy (renderer detects the busy state) and any other
+// explicit cancel request from the UI.
 ipcMain.on('halo-abort', () => {
-  abortState.aborted = true;
+  cancelEverything('user');
 });
 
 function checkPermissions() {
@@ -436,11 +477,45 @@ app.whenReady().then(() => {
   createWindow();
   createTrailWindow();
 
-  // Space toggles listening mode. Configurable because a global Space grab
-  // swallows the spacebar system-wide while the app runs.
-  const hotkey = process.env.HALO_HOTKEY || 'Space';
-  const ok = globalShortcut.register(hotkey, toggleListening);
-  console.log(ok ? `[halo] listening hotkey: ${hotkey}` : `[halo] FAILED to register hotkey ${hotkey}`);
+  // Escape is a persistent global kill switch — registered once, not tied
+  // to any single run, so it cancels a recording-in-progress even before
+  // the agent has started.
+  const escOk = globalShortcut.register('Escape', () => cancelEverything('Escape'));
+  console.log(escOk ? '[halo] Escape kill switch armed' : '[halo] FAILED to register Escape');
+
+  // Hold ⌥⌘Space to talk. Electron's globalShortcut has no key-up event, so
+  // real hold/release detection needs an OS-level hook (uiohook-napi) that
+  // reports raw keydown/keyup — we track the three keys' down-state and
+  // derive the chord ourselves.
+  const down = { cmd: false, opt: false, space: false };
+  let chordActive = false;
+
+  uIOhook.on('keydown', (e) => {
+    if (e.keycode === UiohookKey.Meta || e.keycode === UiohookKey.MetaRight) down.cmd = true;
+    else if (e.keycode === UiohookKey.Alt || e.keycode === UiohookKey.AltRight) down.opt = true;
+    else if (e.keycode === UiohookKey.Space) down.space = true;
+    else return;
+    if (down.cmd && down.opt && down.space && !chordActive) {
+      chordActive = true;
+      startListening();
+    }
+  });
+  uIOhook.on('keyup', (e) => {
+    if (e.keycode === UiohookKey.Meta || e.keycode === UiohookKey.MetaRight) down.cmd = false;
+    else if (e.keycode === UiohookKey.Alt || e.keycode === UiohookKey.AltRight) down.opt = false;
+    else if (e.keycode === UiohookKey.Space) down.space = false;
+    else return;
+    if (chordActive && !(down.cmd && down.opt && down.space)) {
+      chordActive = false;
+      stopListening();
+    }
+  });
+  try {
+    uIOhook.start();
+    console.log('[halo] hold ⌥⌘Space to talk (uiohook active)');
+  } catch (err) {
+    console.error(`[halo] uiohook failed to start (${err.message}) — hold-to-talk hotkey disabled; use the mic button instead.`);
+  }
 
   // Headless-ish test hook: HALO_TEST_TASK="hover the Apple menu" npm start
   if (process.env.HALO_TEST_TASK) {
@@ -477,4 +552,5 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  uIOhook.stop();
 });
