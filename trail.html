@@ -30,8 +30,13 @@
     const COLORS = { ai: '#378ADD', user: '#FFB340' };
     const LIFE_MS = 1300; // how long a trail segment glows before fading out
 
+    // AI annotation palette (draw_* tools) — persistent until cleared.
+    const SHAPE_COLORS = { red: '#FF453A', blue: '#0A84FF', yellow: '#FFD60A' };
+    const SHAPE_IN_MS = 260; // quick fade/scale-in so drawings feel drawn, not popped
+
     let color = COLORS.ai;
     let pts = []; // { x, y, t }
+    let shapes = []; // { type, color, ...coords, t } — persistent annotations
 
     ipcRenderer.on('trail-mode', (_e, mode) => {
       color = COLORS[mode] || COLORS.ai;
@@ -46,7 +51,42 @@
       if (pts.length > 600) pts.shift();
     });
 
-    ipcRenderer.on('trail-clear', () => { pts = []; });
+    // trail-clear resets the whole overlay (new session); draw-clear only
+    // erases the AI's annotations (the model's clear_drawings tool).
+    ipcRenderer.on('trail-clear', () => { pts = []; shapes = []; });
+    ipcRenderer.on('draw-shape', (_e, s) => { shapes.push({ ...s, t: performance.now() }); });
+    ipcRenderer.on('draw-clear', () => { shapes = []; });
+
+    function drawShape(s, now) {
+      const c = SHAPE_COLORS[s.color] || SHAPE_COLORS.blue;
+      const ease = Math.min(1, (now - s.t) / SHAPE_IN_MS);
+      ctx.globalAlpha = 0.95 * ease;
+      ctx.strokeStyle = c;
+      ctx.shadowColor = c;
+      ctx.shadowBlur = 14;
+      ctx.lineWidth = 3.5;
+      ctx.beginPath();
+      if (s.type === 'ellipse') {
+        ctx.ellipse(s.cx, s.cy, Math.max(1, s.rx), Math.max(1, s.ry), 0, 0, Math.PI * 2);
+      } else if (s.type === 'rect') {
+        ctx.rect(s.x, s.y, s.w, s.h);
+      } else if (s.type === 'line' || s.type === 'arrow') {
+        ctx.moveTo(s.x1, s.y1);
+        ctx.lineTo(s.x2, s.y2);
+      }
+      ctx.stroke();
+      if (s.type === 'arrow') {
+        // Arrowhead: two short strokes swept back from the tip.
+        const ang = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
+        const len = 16;
+        ctx.beginPath();
+        ctx.moveTo(s.x2, s.y2);
+        ctx.lineTo(s.x2 - len * Math.cos(ang - 0.45), s.y2 - len * Math.sin(ang - 0.45));
+        ctx.moveTo(s.x2, s.y2);
+        ctx.lineTo(s.x2 - len * Math.cos(ang + 0.45), s.y2 - len * Math.sin(ang + 0.45));
+        ctx.stroke();
+      }
+    }
 
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -54,6 +94,7 @@
     function frame() {
       const now = performance.now();
       ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      for (const s of shapes) drawShape(s, now);
       pts = pts.filter((p) => now - p.t < LIFE_MS);
       for (let i = 1; i < pts.length; i++) {
         const a = pts[i], b = pts[i - 1];

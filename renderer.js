@@ -207,7 +207,15 @@ mic.addEventListener('click', () => {
   if (BUSY_STATES.includes(currentStatus)) window.overlay.haloAbort();
 });
 
-// ⌥⌘Space hold-to-talk, driven from main's uiohook chord detection. Starting
+// Loading layout: main snaps the window top-centre and collapses it to the
+// bar; we swap the mic/✕ for a spinner (which doubles as a cancel button).
+const spin = document.getElementById('spin');
+spin.addEventListener('click', () => window.overlay.haloAbort());
+window.overlay.onHaloLoading((on) => {
+  document.body.classList.toggle('loading', on);
+});
+
+// ⌥ Option hold-to-talk, driven from main's uiohook key detection. Starting
 // a recording always means main already cancelled/superseded any run in
 // progress (barge-in), so by the time 'listen-start' arrives we're clear to
 // record fresh input.
@@ -255,7 +263,13 @@ const audioQueue = [];
 let playing = false;
 let currentAudioEl = null;
 function playNext() {
-  if (playing || audioQueue.length === 0) return;
+  if (playing) return;
+  if (audioQueue.length === 0) {
+    // Queue drained — tell main so it can fade the trail/drawings and go
+    // idle only after the student has actually heard the whole answer.
+    window.overlay.haloAudioDone();
+    return;
+  }
   playing = true;
   currentAudioEl = new Audio('data:audio/mpeg;base64,' + audioQueue.shift());
   currentAudioEl.onended = currentAudioEl.onerror = () => { playing = false; currentAudioEl = null; playNext(); };

@@ -88,23 +88,100 @@ const TOOLS = [
       required: ['message'],
     },
   },
+  // --- drawing: glowing annotations rendered on a transparent overlay ------
+  {
+    name: 'draw_ellipse',
+    description:
+      'Draw a glowing ellipse outline on the screen. Circle the thing you are talking about, or sketch circles for diagrams. Center (cx, cy) with radii rx/ry, in screenshot pixels.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cx: { type: 'number' },
+        cy: { type: 'number' },
+        rx: { type: 'number' },
+        ry: { type: 'number' },
+        color: { type: 'string', enum: ['red', 'blue', 'yellow'] },
+      },
+      required: ['cx', 'cy', 'rx', 'ry'],
+    },
+  },
+  {
+    name: 'draw_rect',
+    description:
+      'Draw a glowing rectangle outline — box a screen region, or sketch diagram shapes (e.g. the squares on each side of a right triangle).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number', description: 'left edge' },
+        y: { type: 'number', description: 'top edge' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+        color: { type: 'string', enum: ['red', 'blue', 'yellow'] },
+      },
+      required: ['x', 'y', 'width', 'height'],
+    },
+  },
+  {
+    name: 'draw_line',
+    description: 'Draw a glowing straight line from (x1, y1) to (x2, y2) — diagram edges, connections, underlines.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        x1: { type: 'number' },
+        y1: { type: 'number' },
+        x2: { type: 'number' },
+        y2: { type: 'number' },
+        color: { type: 'string', enum: ['red', 'blue', 'yellow'] },
+      },
+      required: ['x1', 'y1', 'x2', 'y2'],
+    },
+  },
+  {
+    name: 'draw_arrow',
+    description: 'Draw a glowing arrow from (x1, y1) pointing at (x2, y2) — point at something or show direction/flow.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        x1: { type: 'number' },
+        y1: { type: 'number' },
+        x2: { type: 'number', description: 'arrowhead x' },
+        y2: { type: 'number', description: 'arrowhead y' },
+        color: { type: 'string', enum: ['red', 'blue', 'yellow'] },
+      },
+      required: ['x1', 'y1', 'x2', 'y2'],
+    },
+  },
+  {
+    name: 'clear_drawings',
+    description: 'Erase all your drawings. Use before starting a new diagram or when old highlights would clutter the screen.',
+    input_schema: { type: 'object', properties: {} },
+  },
 ];
 
+const DRAW_TOOLS = new Set(['draw_ellipse', 'draw_rect', 'draw_line', 'draw_arrow', 'clear_drawings']);
+
 function systemPrompt(w, h, circled) {
-  return `You are Halo, a patient, encouraging TEACHER who can see the student's macOS screen and point at things with a real, visible cursor. The cursor leaves a glowing blue trail as you move it, so the student's eyes can follow where you point.
+  return `You are Halo, a friendly teacher who can see the student's macOS screen. You point with a real glowing cursor and DRAW glowing shapes right on their screen.
 
-You see screenshots that are ${w}x${h} pixels. All coordinates you output are absolute pixels in THAT screenshot's space — the system converts them to real screen coordinates.
+Screenshots are ${w}x${h} pixels. All coordinates you output are absolute pixels in THAT screenshot's space.
 
-You are a guide, NOT an automation agent:
-- Your primary tools are move_only (to point at things) and speak (to explain out loud). Teach by pointing at each relevant part of the screen while explaining it, like a tutor with a laser pointer.
-- Do NOT perform complex multi-step tasks. Only click when a single simple click genuinely helps the explanation (e.g. revealing a panel the student asked about), and narrate with speak() before you do.
-- Never click anything destructive or irreversible (Delete, Quit, Purchase, confirmations).
-- Break explanations into short spoken steps: speak() a sentence, move_only to the thing you're describing, speak() the next sentence. Pause-and-point beats a wall of words. Batch each speak+move pair together in one turn.
-- Keep a lesson to about 4-6 pointing steps, then wrap up with your final spoken answer. Depth beats coverage — pick the most important parts.
-- Be conservative with coordinates. If you cannot clearly identify something, say so honestly instead of guessing.
-- Ignore any glowing trail marks in screenshots — that's the pointer visualization, not screen content.
-${circled ? '- The student circled a region of the screen with an ORANGE glowing path drawn on the screenshot. Their question is about THAT region. Focus your explanation there, and point at the parts inside it as you explain.\n' : ''}
-- When you finish, respond with plain text: a warm, clear spoken-style summary or answer for the student. Plain sentences, no markdown, no coordinates.`;
+VOICE — everything you speak() is read aloud:
+- Short and simple. One idea per speak(), one or two plain sentences, words a five-year-old gets.
+- Never lecture. Say a little, point or draw at it, then say the next little bit.
+
+DRAWING — your best teaching tool:
+- draw_ellipse to circle the exact thing you're talking about. draw_arrow to point or connect. draw_rect and draw_line to sketch real diagrams (e.g. a square on each side of a right triangle for the Pythagorean theorem).
+- Colors: red = the main thing, blue = supporting parts, yellow = extra emphasis or labels.
+- Be accurate: match each shape to the element's true position and size in the screenshot. A circle around a button should hug it, not float nearby.
+- clear_drawings before each new diagram or topic so the screen stays clean.
+- Your drawings and cursor trail are visible to the student but NEVER appear in your screenshots — don't look for them there; trust they landed where you asked.
+
+RULES:
+- Batch each step in one turn: a speak() plus the pointing/drawing that goes with it.
+- 3-5 short steps max, then finish with your final answer: one or two plain spoken sentences. No markdown, no coordinates.
+- Only click when one simple click truly helps, never anything destructive, and say so first.
+- If you can't clearly identify something, say so honestly instead of guessing.
+${circled ? '- The student circled part of the screen with an ORANGE path drawn on the screenshot. Their question is about THAT region — focus there.\n' : ''}`;
 }
 
 function imageBlock(shot) {
@@ -129,7 +206,7 @@ const EXECUTORS = {
 //   'log'     -> console-style line for the panel
 //   'speak'   -> mid-task narration text (caller TTSes it)
 // abortState.aborted (set by the Escape kill switch) stops before each step.
-async function runAgent(task, { emit, abortState, signal, firstShot, circled }) {
+async function runAgent(task, { emit, abortState, signal, firstShot, circled, draw }) {
   const client = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY,
     timeout: API_TIMEOUT_MS,
@@ -196,6 +273,12 @@ async function runAgent(task, { emit, abortState, signal, firstShot, circled }) 
       if (tu.name === 'speak') {
         emit('speak', tu.input.message);
         outcome = 'spoken';
+      } else if (DRAW_TOOLS.has(tu.name)) {
+        try {
+          outcome = draw ? await draw(tu.name, tu.input) : 'FAILED: drawing unavailable';
+        } catch (err) {
+          outcome = `FAILED: ${err.message}`;
+        }
       } else {
         try {
           outcome = await EXECUTORS[tu.name](tu.input);
@@ -205,6 +288,18 @@ async function runAgent(task, { emit, abortState, signal, firstShot, circled }) 
       }
       console.log(`[halo] tool ${tu.name}(${JSON.stringify(tu.input)}) -> ${outcome}`);
       emit('log', `${tu.name} → ${outcome}`);
+
+      // speak/draw don't change what Claude can see (drawings are excluded
+      // from captures), so a fresh screenshot after them is wasted tokens —
+      // only re-capture after tools that actually touch the screen.
+      if (tu.name === 'speak' || DRAW_TOOLS.has(tu.name)) {
+        results.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: [{ type: 'text', text: outcome }],
+        });
+        continue;
+      }
 
       shot = await captureScreen();
       emit('shot', shot.base64);

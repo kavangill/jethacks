@@ -29,7 +29,16 @@
       "Bash(python3 -c ' *)",
       "Bash(osascript -e 'tell application \"System Events\" to tell process \"Google Chrome\" to get value of attribute \"AXFullScreen\" of window 1')",
       "Bash(screencapture -x /private/tmp/claude-501/-Users-kavan-Desktop-jethacks/28adbf05-0e8e-44c1-844d-087e7e3f7318/scratchpad/chrome_test2.png)",
-      "Bash(screencapture -x /private/tmp/claude-501/-Users-kavan-Desktop-jethacks/28adbf05-0e8e-44c1-844d-087e7e3f7318/scratchpad/chrome_test3.png)"
+      "Bash(screencapture -x /private/tmp/claude-501/-Users-kavan-Desktop-jethacks/28adbf05-0e8e-44c1-844d-087e7e3f7318/scratchpad/chrome_test3.png)",
+      "Bash(timeout 15 npm start)",
+      "Bash(pkill -f \"electron .\")",
+      "Bash(pkill -9 -f \"jethacks/node_modules/electron\")",
+      "Bash(node -e \"const {UiohookKey} = require\\('uiohook-napi'\\); console.log\\(JSON.stringify\\(Object.fromEntries\\(Object.entries\\(UiohookKey\\).filter\\(\\([k]\\)=>/Meta|Alt|Space|Ctrl|Shift/.test\\(k\\)\\)\\)\\)\\)\")",
+      "Bash(node --check main.js)",
+      "Bash(node --check renderer.js)",
+      "Bash(timeout 12 npm start)",
+      "Bash(node --check agent.js)",
+      "Bash(node --check preload.js)"
     ]
   }
 }

@@ -216,6 +216,7 @@ let agentActive = false;
 let runGeneration = 0;
 let currentAbort = null;
 let currentController = null;
+let audioPending = false; // TTS handed to the renderer but not finished playing
 
 function haloSend(channel, ...args) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
@@ -226,13 +227,27 @@ function haloSend(channel, ...args) {
 // mode we also record the path so the traced gesture can be drawn onto the
 // screenshot Claude sees.
 let trailTimer = null;
+let trailHideTimer = null; // pending fade-then-hide; cancelled if a new trail starts
 let userPath = [];
 
 function startTrail(mode) {
   if (!trailWin || trailWin.isDestroyed()) return;
   if (mode === 'user') userPath = [];
-  trailWin.showInactive();
+  // A new trail cancels any pending hide from the previous one, so the window
+  // can't disappear out from under an AI run that starts right after a
+  // recording ends.
+  if (trailHideTimer) { clearTimeout(trailHideTimer); trailHideTimer = null; }
+  // Drop any stale points before we show, so nothing from the last session
+  // flashes on the first frame.
+  trailWin.webContents.send('trail-clear');
   trailWin.webContents.send('trail-mode', mode);
+  trailWin.showInactive();
+  // Re-assert level + workspace visibility every time: the AI trail has to sit
+  // above both our own overlay and whatever app the cursor is driving —
+  // including an app that's in its own native-fullscreen Space, which the
+  // once-at-creation flag doesn't reliably cover.
+  trailWin.setAlwaysOnTop(true, 'screen-saver', 2);
+  trailWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   if (trailTimer) clearInterval(trailTimer);
   trailTimer = setInterval(() => {
     const p = screen.getCursorScreenPoint();
@@ -247,10 +262,53 @@ function startTrail(mode) {
 function stopTrail() {
   if (trailTimer) clearInterval(trailTimer);
   trailTimer = null;
-  // Let the glow fade out before hiding the window.
-  setTimeout(() => {
-    if (!trailTimer && trailWin && !trailWin.isDestroyed()) trailWin.hide();
+  // Let the glow fade out before hiding the window. Tracked in trailHideTimer
+  // so a new startTrail can cancel it deterministically (not via a !trailTimer
+  // race).
+  if (trailHideTimer) clearTimeout(trailHideTimer);
+  trailHideTimer = setTimeout(() => {
+    trailHideTimer = null;
+    if (!trailTimer && trailWin && !trailWin.isDestroyed()) {
+      trailWin.hide();
+      trailWin.webContents.send('trail-clear');
+    }
   }, 1500);
+}
+
+// --- AI screen annotations (draw_* tools) ----------------------------------
+// Shapes arrive in screenshot pixel space; scale them to logical screen points
+// (same mapping as toScreenCoords — the screenshot covers the full display
+// from (0,0), so a single scale factor is enough for positions AND sizes).
+function execDraw(name, input) {
+  if (!trailWin || trailWin.isDestroyed()) return 'FAILED: drawing window unavailable';
+  if (name === 'clear_drawings') {
+    trailWin.webContents.send('draw-clear');
+    return 'cleared';
+  }
+  const d = screenshotDims();
+  if (!d) return 'FAILED: no screenshot taken yet';
+  const k = d.displayW / d.imgW;
+  const s = { color: input.color || 'blue' };
+  if (name === 'draw_ellipse') {
+    Object.assign(s, { type: 'ellipse', cx: input.cx * k, cy: input.cy * k, rx: input.rx * k, ry: input.ry * k });
+  } else if (name === 'draw_rect') {
+    Object.assign(s, { type: 'rect', x: input.x * k, y: input.y * k, w: input.width * k, h: input.height * k });
+  } else if (name === 'draw_line' || name === 'draw_arrow') {
+    Object.assign(s, { type: name.slice(5), x1: input.x1 * k, y1: input.y1 * k, x2: input.x2 * k, y2: input.y2 * k });
+  } else {
+    return `FAILED: unknown drawing tool ${name}`;
+  }
+  for (const v of Object.values(s)) {
+    if (typeof v === 'number' && !Number.isFinite(v)) return 'FAILED: bad coordinates';
+  }
+  // startTrail('ai') already showed the window, but re-assert in case a
+  // pending hide fired between runs.
+  if (!trailWin.isVisible()) {
+    trailWin.showInactive();
+    trailWin.setAlwaysOnTop(true, 'screen-saver', 2);
+  }
+  trailWin.webContents.send('draw-shape', s);
+  return `drew ${s.type} (${s.color})`;
 }
 
 // Draw the student's gesture path onto a screenshot (composited in the trail
@@ -278,8 +336,37 @@ function annotateShot(shot, points) {
   });
 }
 
+// --- loading layout ---------------------------------------------------------
+// While the agent works, the overlay snaps to the top-centre of the screen
+// (just under the camera notch) collapsed to the bare textbox with a spinner,
+// then snaps back to wherever the user had it and shows the output.
+let savedBounds = null; // where the window was before the loading snap
+
+function enterLoadingLayout() {
+  if (!win || win.isDestroyed() || savedBounds) return; // already snapped
+  savedBounds = win.getBounds();
+  const wa = screen.getPrimaryDisplay().workArea; // excludes menu bar / notch
+  const x = Math.round(wa.x + (wa.width - WIN_WIDTH) / 2);
+  const y = wa.y + 6;
+  haloSend('halo-loading', true);
+  // resizable:false blocks programmatic setBounds resizes on some platforms —
+  // lift it for the two snaps.
+  win.setResizable(true);
+  win.setBounds({ x, y, width: WIN_WIDTH, height: BAR_HEIGHT }, true);
+  win.setResizable(false);
+}
+
+function exitLoadingLayout() {
+  if (!win || win.isDestroyed() || !savedBounds) return;
+  win.setResizable(true);
+  win.setBounds(savedBounds, true);
+  win.setResizable(false);
+  savedBounds = null;
+  haloSend('halo-loading', false);
+}
+
 // --- hold-to-talk listening mode --------------------------------------------
-// Hold ⌥⌘Space (or the mic button): mic on + amber gesture trail → speak and
+// Hold ⌥ Option (or the mic button): mic on + amber gesture trail → speak and
 // optionally circle something → release → transcribe + annotated screenshot
 // → teacher explains. Starting a recording always supersedes whatever the
 // agent is currently doing (barge-in): output is cut and generation bumped
@@ -290,12 +377,14 @@ function cancelCurrentRun() {
   runGeneration++; // any in-flight run's emits/finally are now stale
   if (currentController) currentController.abort();
   if (currentAbort) currentAbort.aborted = true;
+  audioPending = false; // the queue is about to be wiped; no done event will come
   haloSend('halo-audio-stop');
 }
 
 function startListening() {
   if (listening) return;
   cancelCurrentRun(); // barge-in: cuts off any current speech/thinking
+  exitLoadingLayout(); // if we interrupted a run mid-snap, put the bar back home
   listening = true;
   startTrail('user');
   haloSend('halo-status', 'recording');
@@ -316,9 +405,14 @@ function cancelEverything(reason) {
   cancelCurrentRun();
   if (listening) {
     listening = false;
-    stopTrail();
     haloSend('halo-listen-cancel'); // renderer discards the recorder's audio
   }
+  // Always stop the trail — aborting an AI run has listening === false, and
+  // runHaloTask's finally skips its own stopTrail once the run is stale, so
+  // without this the polling interval keeps drawing a live trail on an idle
+  // screen.
+  stopTrail();
+  exitLoadingLayout();
   agentActive = false;
   haloSend('halo-log', `aborted (${reason})`);
   haloSend('halo-status', 'idle');
@@ -326,8 +420,12 @@ function cancelEverything(reason) {
 
 async function speakOut(text, myAbort, myGen) {
   try {
-    const mp3 = await tts(text);
+    // The model occasionally slips markdown into spoken text despite the
+    // prompt — strip it so ElevenLabs never reads asterisks aloud.
+    const spoken = text.replace(/\*\*?|__|`|^#+\s*/gm, '');
+    const mp3 = await tts(spoken);
     if (myAbort.aborted || myGen !== runGeneration) return; // superseded
+    audioPending = true; // cleared by halo-audio-done when playback drains
     haloSend('halo-audio', mp3.toString('base64'));
   } catch (err) {
     if (myAbort.aborted || myGen !== runGeneration) return;
@@ -339,11 +437,15 @@ async function speakOut(text, myAbort, myGen) {
 async function runHaloTask(task, opts = {}) {
   const myAbort = { aborted: false };
   const myController = new AbortController();
+  // The SDK adds one abort listener per request on this shared signal; a
+  // multi-step lesson easily passes Node's default cap of 10.
+  require('node:events').setMaxListeners(64, myController.signal);
   const myGen = ++runGeneration;
   currentAbort = myAbort;
   currentController = myController;
   agentActive = true;
   win.setIgnoreMouseEvents(true, { forward: true });
+  enterLoadingLayout(); // snap the bar top-centre while we work
   startTrail('ai'); // blue glow so the student can follow the pointer
 
   const stale = () => myGen !== runGeneration;
@@ -365,37 +467,58 @@ async function runHaloTask(task, opts = {}) {
       signal: myController.signal,
       firstShot: opts.firstShot,
       circled: opts.circled,
+      draw: execDraw,
     });
     if (myAbort.aborted || stale()) return;
     console.log(`[halo] final: ${finalText}`);
+    exitLoadingLayout(); // snap back home and reveal the output panel
     haloSend('halo-log', `✓ ${finalText}`);
     haloSend('halo-status', 'speaking');
     await speakOut(finalText, myAbort, myGen);
   } catch (err) {
     if (stale()) return;
     console.error('[halo] agent error:', err);
+    exitLoadingLayout();
     haloSend('halo-error', err.message);
     await speakOut('Sorry, something went wrong with that.', myAbort, myGen);
   } finally {
     if (!stale()) {
       agentActive = false;
+      exitLoadingLayout(); // no-op if already restored above
       // A barge-in may already have started a new recording (listening
       // true) that owns the trail/status now — don't clobber it.
       if (!listening) {
-        stopTrail();
-        haloSend('halo-status', 'idle');
+        // If the final answer is still being spoken, leave the trail window
+        // (and any drawings) up and the status on 'speaking' — the renderer
+        // reports halo-audio-done when playback drains, and we tidy up there.
+        if (!audioPending) {
+          stopTrail();
+          haloSend('halo-status', 'idle');
+        }
       }
     }
   }
 }
+
+// Playback queue drained in the renderer — now it's safe to fade the trail,
+// clear drawings, and go idle (unless a new run/recording already took over).
+ipcMain.on('halo-audio-done', () => {
+  audioPending = false;
+  if (!agentActive && !listening) {
+    stopTrail();
+    haloSend('halo-status', 'idle');
+  }
+});
 
 // Teach path: hold-to-talk recording. The renderer sends the audio here
 // after release; the gesture path is already in userPath.
 ipcMain.handle('halo-teach', async (_event, audioArrayBuffer, mimeType) => {
   try {
     haloSend('halo-status', 'transcribing');
+    enterLoadingLayout();
     const task = await transcribe(Buffer.from(audioArrayBuffer), mimeType);
     if (!task) {
+      exitLoadingLayout();
       haloSend('halo-status', 'idle');
       return { error: 'Heard nothing — try again.' };
     }
@@ -406,6 +529,7 @@ ipcMain.handle('halo-teach', async (_event, audioArrayBuffer, mimeType) => {
     runHaloTask(task, { firstShot, circled });
     return { task };
   } catch (err) {
+    exitLoadingLayout();
     haloSend('halo-status', 'idle');
     return { error: err.message };
   }
@@ -416,8 +540,10 @@ ipcMain.handle('halo-teach', async (_event, audioArrayBuffer, mimeType) => {
 ipcMain.handle('halo-voice', async (_event, audioArrayBuffer, mimeType) => {
   try {
     haloSend('halo-status', 'transcribing');
+    enterLoadingLayout();
     const task = await transcribe(Buffer.from(audioArrayBuffer), mimeType);
     if (!task) {
+      exitLoadingLayout();
       haloSend('halo-status', 'idle');
       return { error: 'Heard nothing — try again.' };
     }
@@ -425,6 +551,7 @@ ipcMain.handle('halo-voice', async (_event, audioArrayBuffer, mimeType) => {
     runHaloTask(task); // fire and forget; progress streams over IPC
     return { task };
   } catch (err) {
+    exitLoadingLayout();
     haloSend('halo-status', 'idle');
     return { error: err.message };
   }
@@ -483,36 +610,27 @@ app.whenReady().then(() => {
   const escOk = globalShortcut.register('Escape', () => cancelEverything('Escape'));
   console.log(escOk ? '[halo] Escape kill switch armed' : '[halo] FAILED to register Escape');
 
-  // Hold ⌥⌘Space to talk. Electron's globalShortcut has no key-up event, so
-  // real hold/release detection needs an OS-level hook (uiohook-napi) that
-  // reports raw keydown/keyup — we track the three keys' down-state and
-  // derive the chord ourselves.
-  const down = { cmd: false, opt: false, space: false };
-  let chordActive = false;
+  // Hold the ⌥ Option key to talk. Electron's globalShortcut has no key-up
+  // event, so real hold/release detection needs an OS-level hook (uiohook-napi)
+  // that reports raw keydown/keyup. A lone modifier avoids the ⌘Space Spotlight
+  // clash the old chord fought. optDown also swallows the key-repeat keydowns
+  // macOS fires while the key is held so we only start recording once.
+  let optDown = false;
+  const isOpt = (e) => e.keycode === UiohookKey.Alt || e.keycode === UiohookKey.AltRight;
 
   uIOhook.on('keydown', (e) => {
-    if (e.keycode === UiohookKey.Meta || e.keycode === UiohookKey.MetaRight) down.cmd = true;
-    else if (e.keycode === UiohookKey.Alt || e.keycode === UiohookKey.AltRight) down.opt = true;
-    else if (e.keycode === UiohookKey.Space) down.space = true;
-    else return;
-    if (down.cmd && down.opt && down.space && !chordActive) {
-      chordActive = true;
-      startListening();
-    }
+    if (!isOpt(e) || optDown) return;
+    optDown = true;
+    startListening();
   });
   uIOhook.on('keyup', (e) => {
-    if (e.keycode === UiohookKey.Meta || e.keycode === UiohookKey.MetaRight) down.cmd = false;
-    else if (e.keycode === UiohookKey.Alt || e.keycode === UiohookKey.AltRight) down.opt = false;
-    else if (e.keycode === UiohookKey.Space) down.space = false;
-    else return;
-    if (chordActive && !(down.cmd && down.opt && down.space)) {
-      chordActive = false;
-      stopListening();
-    }
+    if (!isOpt(e) || !optDown) return;
+    optDown = false;
+    stopListening();
   });
   try {
     uIOhook.start();
-    console.log('[halo] hold ⌥⌘Space to talk (uiohook active)');
+    console.log('[halo] hold ⌥ Option to talk (uiohook active)');
   } catch (err) {
     console.error(`[halo] uiohook failed to start (${err.message}) — hold-to-talk hotkey disabled; use the mic button instead.`);
   }

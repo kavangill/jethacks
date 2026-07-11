@@ -28,4 +28,9 @@ contextBridge.exposeInMainWorld('overlay', {
   onHaloShot: (cb) => ipcRenderer.on('halo-shot', (_e, b64) => cb(b64)),
   onHaloThinking: (cb) => ipcRenderer.on('halo-thinking', (_e, text) => cb(text)),
   onHaloAudioStop: (cb) => ipcRenderer.on('halo-audio-stop', () => cb()),
+
+  // loading layout (window snapped top-centre while the agent works)
+  onHaloLoading: (cb) => ipcRenderer.on('halo-loading', (_e, on) => cb(on)),
+  // TTS playback queue drained — main keeps drawings up until this
+  haloAudioDone: () => ipcRenderer.send('halo-audio-done'),
 });
