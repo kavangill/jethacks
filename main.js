@@ -1,4 +1,12 @@
-const { app, BrowserWindow, screen, ipcMain } = require('electron');
+const {
+  app,
+  BrowserWindow,
+  screen,
+  ipcMain,
+  globalShortcut,
+  systemPreferences,
+  session,
+} = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const https = require('node:https');
@@ -74,10 +82,48 @@ function createWindow() {
   // Start click-through; the renderer toggles this off when the cursor is
   // over an island (bar/panel) and back on over transparent space.
   win.setIgnoreMouseEvents(true, { forward: true });
+
+  // Exclude the overlay from screen captures so Claude never sees (or reads)
+  // its own chat panel in screenshots.
+  win.setContentProtection(true);
+}
+
+// --- full-screen glow-trail window (never captures clicks or screenshots) --
+let trailWin;
+
+function createTrailWindow() {
+  const bounds = screen.getPrimaryDisplay().bounds;
+  trailWin = new BrowserWindow({
+    ...bounds,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    hasShadow: false,
+    focusable: false,
+    show: false,
+    fullscreenable: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+      backgroundThrottling: false,
+    },
+  });
+  trailWin.setIgnoreMouseEvents(true);
+  trailWin.setAlwaysOnTop(true, 'screen-saver', 2);
+  trailWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  trailWin.setContentProtection(true); // invisible to screenshots
+  trailWin.loadFile('trail.html');
 }
 
 ipcMain.on('set-ignore-mouse', (_event, ignore) => {
   if (!win) return;
+  // While the agent is driving the cursor the whole overlay must stay
+  // click-through, or nut.js clicks land on our own bar instead of the app
+  // underneath.
+  if (agentActive && !ignore) return;
   win.setIgnoreMouseEvents(ignore, { forward: true });
 });
 
@@ -154,7 +200,233 @@ ipcMain.on('generate-start', (event, prompt) => {
   req.end();
 });
 
+// ======================= Halo: voice-driven cursor agent =================
+const { runAgent } = require('./agent');
+const { transcribe, tts } = require('./voice');
+const { captureScreen, screenshotDims } = require('./screen');
+
+let agentActive = false;
+const abortState = { aborted: false };
+
+function haloSend(channel, ...args) {
+  if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
+}
+
+// --- cursor trail control --------------------------------------------------
+// Polls the real cursor and streams points to the trail window. In 'user'
+// mode we also record the path so the traced gesture can be drawn onto the
+// screenshot Claude sees.
+let trailTimer = null;
+let userPath = [];
+
+function startTrail(mode) {
+  if (!trailWin || trailWin.isDestroyed()) return;
+  if (mode === 'user') userPath = [];
+  trailWin.showInactive();
+  trailWin.webContents.send('trail-mode', mode);
+  if (trailTimer) clearInterval(trailTimer);
+  trailTimer = setInterval(() => {
+    const p = screen.getCursorScreenPoint();
+    if (mode === 'user') {
+      userPath.push({ x: p.x, y: p.y });
+      if (userPath.length > 4000) userPath.shift();
+    }
+    trailWin.webContents.send('trail-point', p.x, p.y);
+  }, 16);
+}
+
+function stopTrail() {
+  if (trailTimer) clearInterval(trailTimer);
+  trailTimer = null;
+  // Let the glow fade out before hiding the window.
+  setTimeout(() => {
+    if (!trailTimer && trailWin && !trailWin.isDestroyed()) trailWin.hide();
+  }, 1500);
+}
+
+// Draw the student's gesture path onto a screenshot (composited in the trail
+// window's canvas — the main process has no canvas API).
+function annotateShot(shot, points) {
+  return new Promise((resolve) => {
+    const dims = screenshotDims();
+    if (!dims || points.length < 2 || !trailWin || trailWin.isDestroyed()) {
+      return resolve(shot);
+    }
+    const scaled = points.map((p) => ({
+      x: Math.round((p.x * dims.imgW) / dims.displayW),
+      y: Math.round((p.y * dims.imgH) / dims.displayH),
+    }));
+    let done = false;
+    ipcMain.once('annotate-done', (_e, b64) => {
+      if (done) return;
+      done = true;
+      resolve({ base64: b64, width: shot.width, height: shot.height });
+    });
+    trailWin.webContents.send('annotate', shot.base64, scaled);
+    setTimeout(() => {
+      if (!done) { done = true; resolve(shot); }
+    }, 3000);
+  });
+}
+
+// --- spacebar listening mode ------------------------------------------------
+// Space toggles: mic on + amber gesture trail → speak and circle something →
+// Space again → transcribe + annotated screenshot → teacher explains.
+let listening = false;
+
+function toggleListening() {
+  if (agentActive) return;
+  listening = !listening;
+  if (listening) {
+    startTrail('user');
+    haloSend('halo-status', 'recording');
+    haloSend('halo-listen-start');
+  } else {
+    stopTrail();
+    haloSend('halo-status', 'transcribing');
+    haloSend('halo-listen-stop'); // renderer stops the recorder → halo-teach
+  }
+}
+
+async function speakOut(text) {
+  try {
+    const mp3 = await tts(text);
+    haloSend('halo-audio', mp3.toString('base64'));
+  } catch (err) {
+    console.error('[halo] TTS failed:', err.message);
+    haloSend('halo-log', `TTS failed: ${err.message}`);
+  }
+}
+
+async function runHaloTask(task, opts = {}) {
+  if (agentActive) return;
+  agentActive = true;
+  abortState.aborted = false;
+  win.setIgnoreMouseEvents(true, { forward: true });
+  startTrail('ai'); // blue glow so the student can follow the pointer
+
+  // Kill switch: Escape aborts the loop from anywhere, mid-demo.
+  globalShortcut.register('Escape', () => {
+    abortState.aborted = true;
+    haloSend('halo-log', 'aborted (Escape)');
+  });
+
+  const emit = (event, data) => {
+    if (event === 'status') haloSend('halo-status', data);
+    else if (event === 'log') haloSend('halo-log', data);
+    else if (event === 'speak') speakOut(data);
+    else if (event === 'shot') haloSend('halo-shot', data);
+    else if (event === 'thinking') haloSend('halo-thinking', data);
+  };
+
+  try {
+    haloSend('halo-status', 'thinking');
+    const finalText = await runAgent(task, {
+      emit,
+      abortState,
+      firstShot: opts.firstShot,
+      circled: opts.circled,
+    });
+    if (abortState.aborted) {
+      haloSend('halo-status', 'idle');
+      return;
+    }
+    console.log(`[halo] final: ${finalText}`);
+    haloSend('halo-log', `✓ ${finalText}`);
+    haloSend('halo-status', 'speaking');
+    await speakOut(finalText);
+  } catch (err) {
+    console.error('[halo] agent error:', err);
+    haloSend('halo-error', err.message);
+    await speakOut('Sorry, something went wrong with that.');
+  } finally {
+    globalShortcut.unregister('Escape');
+    stopTrail();
+    agentActive = false;
+    haloSend('halo-status', 'idle');
+  }
+}
+
+// Teach path: Space-toggled recording. The renderer sends the audio here
+// after the second Space press; the gesture path is already in userPath.
+ipcMain.handle('halo-teach', async (_event, audioArrayBuffer, mimeType) => {
+  if (agentActive) return { error: 'busy' };
+  try {
+    haloSend('halo-status', 'transcribing');
+    const task = await transcribe(Buffer.from(audioArrayBuffer), mimeType);
+    if (!task) {
+      haloSend('halo-status', 'idle');
+      return { error: 'Heard nothing — try again.' };
+    }
+    haloSend('halo-transcript', task);
+    const shot = await captureScreen();
+    const circled = userPath.length > 20;
+    const firstShot = circled ? await annotateShot(shot, userPath) : shot;
+    runHaloTask(task, { firstShot, circled });
+    return { task };
+  } catch (err) {
+    haloSend('halo-status', 'idle');
+    return { error: err.message };
+  }
+});
+
+// Voice path: renderer records webm while the mic button is held, sends it
+// here on release; we transcribe then hand the text to the agent.
+ipcMain.handle('halo-voice', async (_event, audioArrayBuffer, mimeType) => {
+  if (agentActive) return { error: 'busy' };
+  try {
+    haloSend('halo-status', 'transcribing');
+    const task = await transcribe(Buffer.from(audioArrayBuffer), mimeType);
+    if (!task) {
+      haloSend('halo-status', 'idle');
+      return { error: 'Heard nothing — try again.' };
+    }
+    haloSend('halo-transcript', task);
+    runHaloTask(task); // fire and forget; progress streams over IPC
+    return { task };
+  } catch (err) {
+    haloSend('halo-status', 'idle');
+    return { error: err.message };
+  }
+});
+
+// Text path for testing/demo fallback: "/do <task>" in the prompt box.
+ipcMain.handle('halo-task', async (_event, task) => {
+  if (agentActive) return { error: 'busy' };
+  haloSend('halo-transcript', task);
+  runHaloTask(task);
+  return { task };
+});
+
+ipcMain.on('halo-abort', () => {
+  abortState.aborted = true;
+});
+
+function checkPermissions() {
+  const accessibility = systemPreferences.isTrustedAccessibilityClient(false);
+  const screenAccess = systemPreferences.getMediaAccessStatus('screen');
+  if (!accessibility || screenAccess !== 'granted') {
+    console.error(`
+==================================================================
+HALO CANNOT CONTROL YOUR CURSOR.
+  Accessibility:    ${accessibility ? 'OK' : 'MISSING'}
+  Screen Recording: ${screenAccess}
+Grant permissions, then FULLY QUIT and relaunch:
+  System Settings → Privacy & Security → Accessibility → add your terminal/Electron app
+  System Settings → Privacy & Security → Screen Recording → same
+==================================================================`);
+  } else {
+    console.log('[halo] permissions OK (accessibility + screen recording)');
+  }
+}
+
 app.whenReady().then(() => {
+  checkPermissions();
+  systemPreferences.askForMediaAccess('microphone').catch(() => {});
+  // getUserMedia from the overlay renderer needs an explicit grant.
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
+    cb(permission === 'media');
+  });
   // Accessory activation policy (no Dock icon / Cmd-Tab entry) — this is
   // what lets an always-on-top window actually float over OTHER apps'
   // native fullscreen Spaces (e.g. a fullscreened Chrome window). Without
@@ -162,8 +434,47 @@ app.whenReady().then(() => {
   // what level/collection-behavior it's given.
   if (process.platform === 'darwin') app.dock.hide();
   createWindow();
+  createTrailWindow();
+
+  // Space toggles listening mode. Configurable because a global Space grab
+  // swallows the spacebar system-wide while the app runs.
+  const hotkey = process.env.HALO_HOTKEY || 'Space';
+  const ok = globalShortcut.register(hotkey, toggleListening);
+  console.log(ok ? `[halo] listening hotkey: ${hotkey}` : `[halo] FAILED to register hotkey ${hotkey}`);
+
+  // Headless-ish test hook: HALO_TEST_TASK="hover the Apple menu" npm start
+  if (process.env.HALO_TEST_TASK) {
+    setTimeout(() => runHaloTask(process.env.HALO_TEST_TASK), 1500);
+  }
+
+  // Simulates the space-circle-speak flow without a mic: draws a synthetic
+  // circle in the middle of the screen and asks HALO_TEST_TEACH about it.
+  if (process.env.HALO_TEST_TEACH) {
+    setTimeout(async () => {
+      const { width, height } = screen.getPrimaryDisplay().size;
+      userPath = [];
+      for (let a = 0; a <= Math.PI * 2 + 0.1; a += 0.05) {
+        userPath.push({
+          x: width / 2 + 220 * Math.cos(a),
+          y: height / 2 + 150 * Math.sin(a),
+        });
+      }
+      const task = process.env.HALO_TEST_TEACH;
+      haloSend('halo-transcript', task);
+      const shot = await captureScreen();
+      const firstShot = await annotateShot(shot, userPath);
+      if (process.env.HALO_DEBUG === '1') {
+        require('node:fs').writeFileSync('/tmp/halo_annotated.png', Buffer.from(firstShot.base64, 'base64'));
+      }
+      runHaloTask(task, { firstShot, circled: true });
+    }, 2500);
+  }
 });
 
 app.on('window-all-closed', () => {
   app.quit();
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
 });

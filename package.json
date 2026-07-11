@@ -4,9 +4,13 @@
   "description": "A simple always-on-top overlay bar with a textbox",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "sh -c 'unset ELECTRON_RUN_AS_NODE; electron .'"
   },
   "devDependencies": {
-    "electron": "^32.0.0"
+    "electron": "^32.3.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
+    "@nut-tree-fork/nut-js": "^4.2.6"
   }
 }

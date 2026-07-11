@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Halo Trail</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <script>
+    const { ipcRenderer } = require('electron');
+
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+
+    function sizeCanvas() {
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+      canvas.style.width = window.innerWidth + 'px';
+      canvas.style.height = window.innerHeight + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    sizeCanvas();
+    window.addEventListener('resize', sizeCanvas);
+
+    const COLORS = { ai: '#378ADD', user: '#FFB340' };
+    const LIFE_MS = 1300; // how long a trail segment glows before fading out
+
+    let color = COLORS.ai;
+    let pts = []; // { x, y, t }
+
+    ipcRenderer.on('trail-mode', (_e, mode) => {
+      color = COLORS[mode] || COLORS.ai;
+      pts = [];
+    });
+
+    ipcRenderer.on('trail-point', (_e, x, y) => {
+      const last = pts[pts.length - 1];
+      // Skip duplicate points so a resting cursor doesn't build a blob.
+      if (last && Math.abs(last.x - x) < 1 && Math.abs(last.y - y) < 1) return;
+      pts.push({ x, y, t: performance.now() });
+      if (pts.length > 600) pts.shift();
+    });
+
+    ipcRenderer.on('trail-clear', () => { pts = []; });
+
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    function frame() {
+      const now = performance.now();
+      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      pts = pts.filter((p) => now - p.t < LIFE_MS);
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i], b = pts[i - 1];
+        // Break the stroke across big jumps (cursor teleports, mode changes).
+        if (Math.hypot(a.x - b.x, a.y - b.y) > 200) continue;
+        const age = (now - a.t) / LIFE_MS; // 0 fresh → 1 gone
+        ctx.globalAlpha = (1 - age) * 0.9;
+        ctx.strokeStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 16 * (1 - age) + 4;
+        ctx.lineWidth = 5 * (1 - age) + 1.5;
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y);
+        ctx.lineTo(a.x, a.y);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+
+    // ---- screenshot annotation service ----------------------------------
+    // Main sends the screenshot + the user's gesture path (already scaled to
+    // image space); we composite the path onto the image and send it back so
+    // Claude can see exactly what the student circled.
+    ipcRenderer.on('annotate', (_e, base64, points) => {
+      const img = new Image();
+      img.onload = () => {
+        const off = document.createElement('canvas');
+        off.width = img.width;
+        off.height = img.height;
+        const octx = off.getContext('2d');
+        octx.drawImage(img, 0, 0);
+        if (points.length > 1) {
+          octx.lineCap = 'round';
+          octx.lineJoin = 'round';
+          octx.strokeStyle = '#FF9F0A';
+          octx.shadowColor = '#FF9F0A';
+          octx.shadowBlur = Math.max(6, img.width * 0.006);
+          octx.lineWidth = Math.max(3, img.width * 0.0035);
+          octx.beginPath();
+          octx.moveTo(points[0].x, points[0].y);
+          for (let i = 1; i < points.length; i++) octx.lineTo(points[i].x, points[i].y);
+          octx.stroke();
+        }
+        ipcRenderer.send('annotate-done', off.toDataURL('image/png').split(',')[1]);
+      };
+      img.onerror = () => ipcRenderer.send('annotate-done', base64);
+      img.src = 'data:image/png;base64,' + base64;
+    });
+  </script>
+</body>
+</html>

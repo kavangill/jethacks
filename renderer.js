@@ -119,6 +119,12 @@ promptInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !generating) {
     const value = promptInput.value.trim();
     if (!value) return;
+    // "/do <task>" runs the Halo cursor agent from text (mic-less fallback).
+    if (value.startsWith('/do ')) {
+      promptInput.value = '';
+      window.overlay.haloTask(value.slice(4).trim());
+      return;
+    }
     startGenerate(value);
   } else if (e.key === 'Escape' && !generating) {
     hidePanel();
@@ -127,6 +133,112 @@ promptInput.addEventListener('keydown', (e) => {
 });
 
 kill.addEventListener('click', () => window.overlay.quit());
+
+// ---------------------------------------------------------------- Halo voice
+// Hold the mic button → record → release → STT → agent drives the cursor →
+// TTS speaks the result. All heavy lifting is in the main process; this side
+// only records audio and renders status.
+const mic = document.getElementById('mic');
+
+let recorder = null;
+let recChunks = [];
+let haloBusy = false;
+
+function setMicState(state) {
+  mic.className = state === 'idle' ? '' : state;
+}
+
+function haloLine(html) {
+  history += html;
+  redraw();
+}
+
+// mode: 'voice' (hold mic button) or 'teach' (Space toggle — main tracks the
+// gesture trail and annotates the screenshot with what the student circled).
+async function startRecording(mode) {
+  if (haloBusy || recorder) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recChunks = [];
+    recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+    recorder.ondataavailable = (e) => e.data.size && recChunks.push(e.data);
+    recorder.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      const blob = new Blob(recChunks, { type: 'audio/webm' });
+      recorder = null;
+      if (blob.size < 2000) { setMicState('idle'); return; } // accidental tap
+      haloBusy = true;
+      setMicState('transcribing');
+      const send = mode === 'teach' ? window.overlay.haloTeach : window.overlay.haloVoice;
+      const res = await send(await blob.arrayBuffer(), 'audio/webm');
+      if (res && res.error) {
+        haloBusy = false;
+        setMicState('idle');
+        haloLine(`<div class="line error">✗ ${escapeHtml(res.error)}</div>`);
+      }
+    };
+    recorder.start();
+    setMicState('recording');
+  } catch (err) {
+    haloLine(`<div class="line error">✗ mic: ${escapeHtml(err.message)}</div>`);
+  }
+}
+
+function stopRecording() {
+  if (recorder && recorder.state === 'recording') recorder.stop();
+}
+
+mic.addEventListener('mousedown', () => startRecording('voice'));
+mic.addEventListener('mouseup', stopRecording);
+mic.addEventListener('mouseleave', stopRecording);
+
+// Space-toggled teaching mode, driven from main's global shortcut.
+window.overlay.onHaloListenStart(() => startRecording('teach'));
+window.overlay.onHaloListenStop(() => stopRecording());
+
+window.overlay.onHaloTranscript((t) => {
+  haloLine(`<div class="line prompt">🎙 ${escapeHtml(t)}</div>`);
+});
+
+window.overlay.onHaloStatus((s) => {
+  setMicState(s);
+  if (s === 'idle') haloBusy = false;
+});
+
+window.overlay.onHaloLog((line) => {
+  haloLine(`<div class="line muted">${escapeHtml(line)}</div>`);
+});
+
+window.overlay.onHaloError((msg) => {
+  haloLine(`<div class="line error">✗ ${escapeHtml(msg)}</div>`);
+});
+
+// Screenshots the agent takes, shown inline in the chat log.
+window.overlay.onHaloShot((b64) => {
+  haloLine(`<img class="shot" src="data:image/png;base64,${b64}" />`);
+  // Images size in after decode; recompute the panel height once they have.
+  setTimeout(redraw, 150);
+});
+
+// Claude's interleaved reasoning while it works.
+window.overlay.onHaloThinking((text) => {
+  haloLine(`<div class="line thinking">${escapeHtml(text)}</div>`);
+});
+
+// TTS mp3s from main, played in order.
+const audioQueue = [];
+let playing = false;
+function playNext() {
+  if (playing || audioQueue.length === 0) return;
+  playing = true;
+  const el = new Audio('data:audio/mpeg;base64,' + audioQueue.shift());
+  el.onended = el.onerror = () => { playing = false; playNext(); };
+  el.play().catch(() => { playing = false; playNext(); });
+}
+window.overlay.onHaloAudio((b64) => {
+  audioQueue.push(b64);
+  playNext();
+});
 
 // ---------------------------------------------------------------- click-through
 // Most of the fixed-size window is empty transparent space; forward mouse
