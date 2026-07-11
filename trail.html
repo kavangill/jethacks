@@ -32,7 +32,9 @@
 
     // AI annotation palette (draw_* tools) — persistent until cleared.
     const SHAPE_COLORS = { red: '#FF453A', blue: '#0A84FF', yellow: '#FFD60A' };
-    const SHAPE_IN_MS = 260; // quick fade/scale-in so drawings feel drawn, not popped
+    // Draw-on times: each shape animates like a hand sketching it — circles
+    // sweep around, arrows grow start-to-tip, rects trace their perimeter.
+    const DRAW_MS = { ellipse: 600, rect: 550, line: 450, arrow: 500, text: 300 };
 
     let color = COLORS.ai;
     let pts = []; // { x, y, t }
@@ -54,38 +56,92 @@
     // trail-clear resets the whole overlay (new session); draw-clear only
     // erases the AI's annotations (the model's clear_drawings tool).
     ipcRenderer.on('trail-clear', () => { pts = []; shapes = []; });
+    // debug-only: opaque backdrop so calibration captures are noise-free
+    ipcRenderer.on('trail-bg', (_e, color) => { document.body.style.background = color; });
     ipcRenderer.on('draw-shape', (_e, s) => { shapes.push({ ...s, t: performance.now() }); });
     ipcRenderer.on('draw-clear', () => { shapes = []; });
 
-    function drawShape(s, now) {
+    // Paint one shape onto any 2d context at draw-on progress e (0..1, eased).
+    // Shared by the live overlay and the screenshot compositor (e = 1 there).
+    // Marker look: shapes and plain lines are thick; arrows and text run
+    // thinner so labels and pointers stay crisp and readable.
+    function paintShape(g, s, e) {
       const c = SHAPE_COLORS[s.color] || SHAPE_COLORS.blue;
-      const ease = Math.min(1, (now - s.t) / SHAPE_IN_MS);
-      ctx.globalAlpha = 0.95 * ease;
-      ctx.strokeStyle = c;
-      ctx.shadowColor = c;
-      ctx.shadowBlur = 14;
-      ctx.lineWidth = 3.5;
-      ctx.beginPath();
+      g.strokeStyle = c;
+      g.fillStyle = c;
+      g.lineCap = 'round';
+      g.lineJoin = 'round';
+      if (s.type === 'text') {
+        g.globalAlpha = e;
+        const pop = 0.85 + 0.15 * e; // slight settle-in
+        g.font = `600 ${s.size * pop}px "Marker Felt", "Chalkboard SE", sans-serif`;
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.fillText(s.text, s.x, s.y);
+        g.globalAlpha = 1;
+        return;
+      }
       if (s.type === 'ellipse') {
-        ctx.ellipse(s.cx, s.cy, Math.max(1, s.rx), Math.max(1, s.ry), 0, 0, Math.PI * 2);
+        g.lineWidth = 7;
+        g.beginPath();
+        // Sweep around from the top, like a pen circling the target.
+        const start = -Math.PI / 2;
+        g.ellipse(s.cx, s.cy, Math.max(1, s.rx), Math.max(1, s.ry), 0, start, start + e * Math.PI * 2);
+        g.stroke();
       } else if (s.type === 'rect') {
-        ctx.rect(s.x, s.y, s.w, s.h);
-      } else if (s.type === 'line' || s.type === 'arrow') {
-        ctx.moveTo(s.x1, s.y1);
-        ctx.lineTo(s.x2, s.y2);
-      }
-      ctx.stroke();
-      if (s.type === 'arrow') {
-        // Arrowhead: two short strokes swept back from the tip.
+        g.lineWidth = 7;
+        // Trace the perimeter clockwise from the top-left corner.
+        const pts = [
+          [s.x, s.y], [s.x + s.w, s.y], [s.x + s.w, s.y + s.h], [s.x, s.y + s.h], [s.x, s.y],
+        ];
+        let remain = e * 2 * (Math.abs(s.w) + Math.abs(s.h));
+        g.beginPath();
+        g.moveTo(pts[0][0], pts[0][1]);
+        for (let i = 1; i < pts.length && remain > 0; i++) {
+          const dx = pts[i][0] - pts[i - 1][0];
+          const dy = pts[i][1] - pts[i - 1][1];
+          const seg = Math.abs(dx) + Math.abs(dy);
+          if (remain >= seg) {
+            g.lineTo(pts[i][0], pts[i][1]);
+            remain -= seg;
+          } else {
+            g.lineTo(pts[i - 1][0] + (dx * remain) / seg, pts[i - 1][1] + (dy * remain) / seg);
+            remain = 0;
+          }
+        }
+        g.stroke();
+      } else if (s.type === 'line') {
+        g.lineWidth = 7;
+        g.beginPath();
+        g.moveTo(s.x1, s.y1);
+        g.lineTo(s.x1 + (s.x2 - s.x1) * e, s.y1 + (s.y2 - s.y1) * e);
+        g.stroke();
+      } else if (s.type === 'arrow') {
+        g.lineWidth = 3.5;
+        // The shaft grows toward the target with the head riding the tip.
+        const tx = s.x1 + (s.x2 - s.x1) * e;
+        const ty = s.y1 + (s.y2 - s.y1) * e;
+        g.beginPath();
+        g.moveTo(s.x1, s.y1);
+        g.lineTo(tx, ty);
         const ang = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
-        const len = 16;
-        ctx.beginPath();
-        ctx.moveTo(s.x2, s.y2);
-        ctx.lineTo(s.x2 - len * Math.cos(ang - 0.45), s.y2 - len * Math.sin(ang - 0.45));
-        ctx.moveTo(s.x2, s.y2);
-        ctx.lineTo(s.x2 - len * Math.cos(ang + 0.45), s.y2 - len * Math.sin(ang + 0.45));
-        ctx.stroke();
+        const len = 13;
+        g.moveTo(tx, ty);
+        g.lineTo(tx - len * Math.cos(ang - 0.45), ty - len * Math.sin(ang - 0.45));
+        g.moveTo(tx, ty);
+        g.lineTo(tx - len * Math.cos(ang + 0.45), ty - len * Math.sin(ang + 0.45));
+        g.stroke();
       }
+    }
+
+    function drawShape(s, now) {
+      const dur = DRAW_MS[s.type] || 500;
+      const p = Math.min(1, (now - s.t) / dur);
+      const e = 1 - Math.pow(1 - p, 3); // ease-out: fast start, gentle finish
+      ctx.shadowColor = SHAPE_COLORS[s.color] || SHAPE_COLORS.blue;
+      ctx.shadowBlur = s.type === 'text' ? 2 : 4;
+      paintShape(ctx, s, e);
+      ctx.shadowBlur = 0;
     }
 
     ctx.lineCap = 'round';
@@ -143,6 +199,27 @@
         ipcRenderer.send('annotate-done', off.toDataURL('image/png').split(',')[1]);
       };
       img.onerror = () => ipcRenderer.send('annotate-done', base64);
+      img.src = 'data:image/png;base64,' + base64;
+    });
+
+    // ---- drawing compositor ----------------------------------------------
+    // Replays the current shape list onto a screenshot so Claude can see
+    // where its own marks landed (the live overlay is capture-protected).
+    // Shapes are in window coords; image = (window + origin) * k.
+    ipcRenderer.on('annotate-shapes', (_e, base64, { k, ox, oy }) => {
+      const img = new Image();
+      img.onload = () => {
+        const off = document.createElement('canvas');
+        off.width = img.width;
+        off.height = img.height;
+        const octx = off.getContext('2d');
+        octx.drawImage(img, 0, 0);
+        octx.setTransform(k, 0, 0, k, ox * k, oy * k);
+        for (const s of shapes) paintShape(octx, s, 1);
+        octx.setTransform(1, 0, 0, 1, 0, 0);
+        ipcRenderer.send('annotate-shapes-done', off.toDataURL('image/png').split(',')[1]);
+      };
+      img.onerror = () => ipcRenderer.send('annotate-shapes-done', base64);
       img.src = 'data:image/png;base64,' + base64;
     });
   </script>

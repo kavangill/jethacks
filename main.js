@@ -116,7 +116,20 @@ function createTrailWindow() {
   trailWin.setAlwaysOnTop(true, 'screen-saver', 2);
   trailWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   trailWin.setContentProtection(true); // invisible to screenshots
+  // macOS clamps a fresh window below the menu bar (y=33 on notched Macs) —
+  // at creation the always-on-top level hasn't been applied yet. Re-assert
+  // the bounds now that it has, so the canvas actually starts at y=0.
+  trailWin.setBounds(bounds);
   trailWin.loadFile('trail.html');
+}
+
+// Where the trail window ACTUALLY sits. If macOS still refuses to place it at
+// the display origin, every screen-space coordinate we hand the canvas must
+// be shifted by this offset or all drawings land exactly that far off-target.
+function trailOrigin() {
+  if (!trailWin || trailWin.isDestroyed()) return { x: 0, y: 0 };
+  const b = trailWin.getBounds();
+  return { x: b.x, y: b.y };
 }
 
 ipcMain.on('set-ignore-mouse', (_event, ignore) => {
@@ -218,6 +231,24 @@ let currentAbort = null;
 let currentController = null;
 let audioPending = false; // TTS handed to the renderer but not finished playing
 
+// Voice↔drawing sync: every TTS clip gets an id, and the renderer reports
+// when each clip STARTS playing. A mid-task speak() blocks the agent loop on
+// that signal, so the drawings batched after it appear with their sentence.
+let clipSeq = 0;
+const clipStartWaiters = new Map(); // clip id -> resolve()
+
+// Previous exchange, fed to the next run so follow-ups and interrupts stay
+// contextual instead of starting cold.
+let lastLesson = null; // { task, answer } — answer null if interrupted
+
+function lessonContext() {
+  if (!lastLesson) return '';
+  if (lastLesson.answer) {
+    return `Context: the student's previous question was "${lastLesson.task}" and you finished answering: "${lastLesson.answer}". If this new request is a follow-up, build on that; otherwise start fresh.`;
+  }
+  return `Context: you were interrupted mid-explanation of "${lastLesson.task}". The student's new request below may adjust or redirect that explanation — follow the new request.`;
+}
+
 function haloSend(channel, ...args) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args);
 }
@@ -239,8 +270,12 @@ function startTrail(mode) {
   if (trailHideTimer) { clearTimeout(trailHideTimer); trailHideTimer = null; }
   // Drop any stale points before we show, so nothing from the last session
   // flashes on the first frame.
+  shapesDrawn = 0;
   trailWin.webContents.send('trail-clear');
   trailWin.webContents.send('trail-mode', mode);
+  // Nudge back to the display origin (macOS may have re-clamped it), then
+  // measure where it truly ended up — the interval below corrects for it.
+  trailWin.setBounds(screen.getPrimaryDisplay().bounds);
   trailWin.showInactive();
   // Re-assert level + workspace visibility every time: the AI trail has to sit
   // above both our own overlay and whatever app the cursor is driving —
@@ -248,6 +283,7 @@ function startTrail(mode) {
   // once-at-creation flag doesn't reliably cover.
   trailWin.setAlwaysOnTop(true, 'screen-saver', 2);
   trailWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  const o = trailOrigin();
   if (trailTimer) clearInterval(trailTimer);
   trailTimer = setInterval(() => {
     const p = screen.getCursorScreenPoint();
@@ -255,7 +291,7 @@ function startTrail(mode) {
       userPath.push({ x: p.x, y: p.y });
       if (userPath.length > 4000) userPath.shift();
     }
-    trailWin.webContents.send('trail-point', p.x, p.y);
+    trailWin.webContents.send('trail-point', p.x - o.x, p.y - o.y);
   }, 16);
 }
 
@@ -270,6 +306,7 @@ function stopTrail() {
     trailHideTimer = null;
     if (!trailTimer && trailWin && !trailWin.isDestroyed()) {
       trailWin.hide();
+      shapesDrawn = 0;
       trailWin.webContents.send('trail-clear');
     }
   }, 1500);
@@ -279,9 +316,12 @@ function stopTrail() {
 // Shapes arrive in screenshot pixel space; scale them to logical screen points
 // (same mapping as toScreenCoords — the screenshot covers the full display
 // from (0,0), so a single scale factor is enough for positions AND sizes).
+let shapesDrawn = 0; // shapes currently on screen (gates screenshot compositing)
+
 function execDraw(name, input) {
   if (!trailWin || trailWin.isDestroyed()) return 'FAILED: drawing window unavailable';
   if (name === 'clear_drawings') {
+    shapesDrawn = 0;
     trailWin.webContents.send('draw-clear');
     return 'cleared';
   }
@@ -295,20 +335,63 @@ function execDraw(name, input) {
     Object.assign(s, { type: 'rect', x: input.x * k, y: input.y * k, w: input.width * k, h: input.height * k });
   } else if (name === 'draw_line' || name === 'draw_arrow') {
     Object.assign(s, { type: name.slice(5), x1: input.x1 * k, y1: input.y1 * k, x2: input.x2 * k, y2: input.y2 * k });
+  } else if (name === 'draw_text') {
+    const text = String(input.text || '').slice(0, 60).trim();
+    if (!text) return 'FAILED: empty text';
+    Object.assign(s, { type: 'text', x: input.x * k, y: input.y * k, size: (input.size || 34) * k, text });
   } else {
     return `FAILED: unknown drawing tool ${name}`;
   }
   for (const v of Object.values(s)) {
     if (typeof v === 'number' && !Number.isFinite(v)) return 'FAILED: bad coordinates';
   }
+  // Screen coords -> trail-window canvas coords. The window SHOULD sit at the
+  // display origin, but macOS can clamp it below the menu bar — subtract its
+  // real origin or every shape lands exactly that far off-target.
+  const o = trailOrigin();
+  for (const f of ['cx', 'x', 'x1', 'x2']) if (s[f] != null) s[f] -= o.x;
+  for (const f of ['cy', 'y', 'y1', 'y2']) if (s[f] != null) s[f] -= o.y;
   // startTrail('ai') already showed the window, but re-assert in case a
   // pending hide fired between runs.
   if (!trailWin.isVisible()) {
     trailWin.showInactive();
     trailWin.setAlwaysOnTop(true, 'screen-saver', 2);
   }
+  shapesDrawn++;
   trailWin.webContents.send('draw-shape', s);
   return `drew ${s.type} (${s.color})`;
+}
+
+// Composite the current drawings onto a screenshot (in the trail window's
+// canvas) so Claude can SEE where its marks landed and correct a miss.
+function annotateShapes(shot) {
+  return new Promise((resolve) => {
+    if (!shapesDrawn || !trailWin || trailWin.isDestroyed()) return resolve(shot);
+    const d = screenshotDims();
+    if (!d) return resolve(shot);
+    const o = trailOrigin();
+    let done = false;
+    const onDone = (_e, b64) => {
+      if (done) return;
+      done = true;
+      resolve({ base64: b64, width: shot.width, height: shot.height });
+    };
+    ipcMain.once('annotate-shapes-done', onDone);
+    // canvas coords -> image coords: add the window origin back, then scale.
+    trailWin.webContents.send('annotate-shapes', shot.base64, {
+      k: d.imgW / d.displayW,
+      ox: o.x,
+      oy: o.y,
+    });
+    setTimeout(() => {
+      if (!done) {
+        done = true;
+        // Drop the stale listener or it would eat the NEXT request's reply.
+        ipcMain.removeListener('annotate-shapes-done', onDone);
+        resolve(shot);
+      }
+    }, 3000);
+  });
 }
 
 // Draw the student's gesture path onto a screenshot (composited in the trail
@@ -324,22 +407,29 @@ function annotateShot(shot, points) {
       y: Math.round((p.y * dims.imgH) / dims.displayH),
     }));
     let done = false;
-    ipcMain.once('annotate-done', (_e, b64) => {
+    const onDone = (_e, b64) => {
       if (done) return;
       done = true;
       resolve({ base64: b64, width: shot.width, height: shot.height });
-    });
+    };
+    ipcMain.once('annotate-done', onDone);
     trailWin.webContents.send('annotate', shot.base64, scaled);
     setTimeout(() => {
-      if (!done) { done = true; resolve(shot); }
+      if (!done) {
+        done = true;
+        ipcMain.removeListener('annotate-done', onDone); // don't eat the next reply
+        resolve(shot);
+      }
     }, 3000);
   });
 }
 
 // --- loading layout ---------------------------------------------------------
 // While the agent works, the overlay snaps to the top-centre of the screen
-// (just under the camera notch) collapsed to the bare textbox with a spinner,
-// then snaps back to wherever the user had it and shows the output.
+// (just under the camera notch) collapsed to the bare textbox with a spinner.
+// The formula board drops DOWN from that bar as the agent writes math on it,
+// then everything snaps back to wherever the user had it and shows the output.
+const BOARD_MAX = 360; // formula board's max height below the bar
 let savedBounds = null; // where the window was before the loading snap
 
 function enterLoadingLayout() {
@@ -352,7 +442,7 @@ function enterLoadingLayout() {
   // resizable:false blocks programmatic setBounds resizes on some platforms —
   // lift it for the two snaps.
   win.setResizable(true);
-  win.setBounds({ x, y, width: WIN_WIDTH, height: BAR_HEIGHT }, true);
+  win.setBounds({ x, y, width: WIN_WIDTH, height: BAR_HEIGHT + 6 + BOARD_MAX }, true);
   win.setResizable(false);
 }
 
@@ -378,12 +468,19 @@ function cancelCurrentRun() {
   if (currentController) currentController.abort();
   if (currentAbort) currentAbort.aborted = true;
   audioPending = false; // the queue is about to be wiped; no done event will come
+  // Unblock any speak() awaiting playback-start so the stale loop can exit.
+  for (const resolve of clipStartWaiters.values()) resolve();
+  clipStartWaiters.clear();
   haloSend('halo-audio-stop');
 }
 
 function startListening() {
   if (listening) return;
   cancelCurrentRun(); // barge-in: cuts off any current speech/thinking
+  // The superseded run's finally skips its cleanup (it's stale), so release
+  // the click-through lock here or the mic button stays dead until the next
+  // run finishes.
+  agentActive = false;
   exitLoadingLayout(); // if we interrupted a run mid-snap, put the bar back home
   listening = true;
   startTrail('user');
@@ -418,21 +515,34 @@ function cancelEverything(reason) {
   haloSend('halo-status', 'idle');
 }
 
+// The model occasionally slips markdown into spoken text despite the prompt —
+// strip bold/code/headings/bullets so ElevenLabs never reads asterisks aloud.
+function toSpokenText(text) {
+  return text.replace(/\*\*?|__|`|^#+\s*|^\s*[-•]\s*/gm, '');
+}
+
 async function speakOut(text, myAbort, myGen) {
   try {
-    // The model occasionally slips markdown into spoken text despite the
-    // prompt — strip it so ElevenLabs never reads asterisks aloud.
-    const spoken = text.replace(/\*\*?|__|`|^#+\s*/gm, '');
-    const mp3 = await tts(spoken);
+    const mp3 = await tts(toSpokenText(text));
     if (myAbort.aborted || myGen !== runGeneration) return; // superseded
     audioPending = true; // cleared by halo-audio-done when playback drains
-    haloSend('halo-audio', mp3.toString('base64'));
+    haloSend('halo-audio', { id: ++clipSeq, b64: mp3.toString('base64') });
   } catch (err) {
     if (myAbort.aborted || myGen !== runGeneration) return;
     console.error('[halo] TTS failed:', err.message);
     haloSend('halo-log', `TTS failed: ${err.message}`);
   }
 }
+
+// Renderer reports a clip has started playing — release the speak() that's
+// gating this turn's drawings on it.
+ipcMain.on('halo-audio-playing', (_e, id) => {
+  const resolve = clipStartWaiters.get(id);
+  if (resolve) {
+    resolve();
+    clipStartWaiters.delete(id);
+  }
+});
 
 async function runHaloTask(task, opts = {}) {
   const myAbort = { aborted: false };
@@ -448,15 +558,43 @@ async function runHaloTask(task, opts = {}) {
   enterLoadingLayout(); // snap the bar top-centre while we work
   startTrail('ai'); // blue glow so the student can follow the pointer
 
+  // Capture the previous exchange BEFORE overwriting it with this run.
+  const context = lessonContext();
+  lastLesson = { task, answer: null }; // answer filled in on success
+
   const stale = () => myGen !== runGeneration;
 
   const emit = (event, data) => {
     if (stale()) return;
     if (event === 'status') haloSend('halo-status', data);
     else if (event === 'log') haloSend('halo-log', data);
-    else if (event === 'speak') speakOut(data, myAbort, myGen);
     else if (event === 'shot') haloSend('halo-shot', data);
     else if (event === 'thinking') haloSend('halo-thinking', data);
+    else if (event === 'board') haloSend('halo-board', data);
+  };
+
+  // Mid-task narration: TTS the sentence, queue it, and resolve once the
+  // renderer actually STARTS that clip — so the agent's next drawings hit
+  // the screen in sync with the voice instead of racing ahead of it.
+  const speakAndWait = async (text) => {
+    if (myAbort.aborted || stale()) return 'skipped (cancelled)';
+    let mp3;
+    try {
+      mp3 = await tts(toSpokenText(text));
+    } catch (err) {
+      console.error('[halo] TTS failed:', err.message);
+      haloSend('halo-log', `TTS failed: ${err.message}`);
+      return `FAILED to speak: ${err.message}`;
+    }
+    if (myAbort.aborted || stale()) return 'skipped (cancelled)';
+    audioPending = true;
+    const id = ++clipSeq;
+    const started = new Promise((resolve) => clipStartWaiters.set(id, resolve));
+    haloSend('halo-audio', { id, b64: mp3.toString('base64') });
+    // Safety timeout so a renderer hiccup can never hang the lesson.
+    await Promise.race([started, new Promise((r) => setTimeout(r, 30000))]);
+    clipStartWaiters.delete(id);
+    return 'spoken';
   };
 
   try {
@@ -468,44 +606,48 @@ async function runHaloTask(task, opts = {}) {
       firstShot: opts.firstShot,
       circled: opts.circled,
       draw: execDraw,
+      annotate: annotateShapes,
+      speak: speakAndWait,
+      context,
     });
     if (myAbort.aborted || stale()) return;
     console.log(`[halo] final: ${finalText}`);
-    exitLoadingLayout(); // snap back home and reveal the output panel
+    lastLesson = { task, answer: String(finalText).slice(0, 400) };
     haloSend('halo-log', `✓ ${finalText}`);
     haloSend('halo-status', 'speaking');
     await speakOut(finalText, myAbort, myGen);
   } catch (err) {
     if (stale()) return;
     console.error('[halo] agent error:', err);
-    exitLoadingLayout();
     haloSend('halo-error', err.message);
     await speakOut('Sorry, something went wrong with that.', myAbort, myGen);
   } finally {
     if (!stale()) {
       agentActive = false;
-      exitLoadingLayout(); // no-op if already restored above
       // A barge-in may already have started a new recording (listening
       // true) that owns the trail/status now — don't clobber it.
-      if (!listening) {
-        // If the final answer is still being spoken, leave the trail window
-        // (and any drawings) up and the status on 'speaking' — the renderer
-        // reports halo-audio-done when playback drains, and we tidy up there.
-        if (!audioPending) {
-          stopTrail();
-          haloSend('halo-status', 'idle');
-        }
+      if (!listening && !audioPending) {
+        // Nothing left to speak — snap the bar back home, fade the trail,
+        // and go idle now.
+        stopTrail();
+        exitLoadingLayout();
+        haloSend('halo-status', 'idle');
       }
+      // Otherwise the final answer is still being spoken: keep the loading
+      // bar (and trail/drawings) up until the renderer reports
+      // halo-audio-done, so we only snap home once the voice stops.
     }
   }
 }
 
-// Playback queue drained in the renderer — now it's safe to fade the trail,
-// clear drawings, and go idle (unless a new run/recording already took over).
+// Playback queue drained in the renderer — the voice has stopped, so now it's
+// safe to snap the bar back home, reveal the output, fade the trail, and go
+// idle (unless a new run/recording already took over).
 ipcMain.on('halo-audio-done', () => {
   audioPending = false;
   if (!agentActive && !listening) {
     stopTrail();
+    exitLoadingLayout();
     haloSend('halo-status', 'idle');
   }
 });
@@ -660,6 +802,58 @@ app.whenReady().then(() => {
         require('node:fs').writeFileSync('/tmp/halo_annotated.png', Buffer.from(firstShot.base64, 'base64'));
       }
       runHaloTask(task, { firstShot, circled: true });
+    }, 2500);
+  }
+
+  // Calibration test: draws a red border at the exact edges of the screenshot
+  // coordinate space plus a center ellipse, captures the real screen, and
+  // measures where the red pixels actually landed. Any systematic offset
+  // between drawing space and screen space shows up as asymmetric margins.
+  // HALO_TEST_GRID=/path/out.png npm start
+  if (process.env.HALO_TEST_GRID) {
+    setTimeout(async () => {
+      const { nativeImage } = require('electron');
+      const { execFile } = require('node:child_process');
+      trailWin.setContentProtection(false); // must be visible to the capture
+      trailWin.webContents.send('trail-bg', '#000'); // opaque: kill wallpaper noise
+      const shot = await captureScreen(); // establishes dims
+      startTrail('ai');
+      console.log(`[grid] trailWin bounds: ${JSON.stringify(trailWin.getBounds())}`);
+      // Inset rect: fully inside the window even if macOS clamps it below the
+      // menu bar. Any drawing-space offset shows as a nonzero per-edge delta.
+      const rx = Math.round(shot.width * 0.15), ry = Math.round(shot.height * 0.15);
+      const rw = Math.round(shot.width * 0.7), rh = Math.round(shot.height * 0.7);
+      execDraw('draw_rect', { x: rx, y: ry, width: rw, height: rh, color: 'red' });
+      setTimeout(() => {
+        const out = process.env.HALO_TEST_GRID;
+        execFile('screencapture', ['-x', '-D', '1', out], () => {
+          const img = nativeImage.createFromPath(out);
+          const { width: W, height: H } = img.getSize();
+          const d = screenshotDims();
+          const s = W / d.displayW; // capture px per logical px (retina = 2)
+          const k = d.displayW / d.imgW; // logical px per image px
+          const exp = { L: rx * k * s, T: ry * k * s, R: (rx + rw) * k * s, B: (ry + rh) * k * s };
+          const bmp = img.toBitmap(); // BGRA
+          const yStart = Math.round((trailWin.getBounds().y + 4) * s); // skip menu-bar band
+          let minX = W, minY = H, maxX = -1, maxY = -1;
+          for (let y = yStart; y < H; y += 2) {
+            for (let x = 0; x < W; x += 2) {
+              const i = (y * W + x) * 4;
+              if (bmp[i + 2] > 190 && bmp[i + 1] < 110 && bmp[i] < 110) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+              }
+            }
+          }
+          const f = (n) => Math.round(n);
+          console.log(`[grid] expected L:${f(exp.L)} T:${f(exp.T)} R:${f(exp.R)} B:${f(exp.B)}`);
+          console.log(`[grid] measured L:${minX} T:${minY} R:${maxX} B:${maxY}`);
+          console.log(`[grid] deltas   L:${f(minX - exp.L)} T:${f(minY - exp.T)} R:${f(maxX - exp.R)} B:${f(maxY - exp.B)} (capture px; stroke≈±10 ok)`);
+          app.quit();
+        });
+      }, 1500);
     }, 2500);
   }
 });

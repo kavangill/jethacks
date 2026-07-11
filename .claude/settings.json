@@ -38,7 +38,14 @@
       "Bash(node --check renderer.js)",
       "Bash(timeout 12 npm start)",
       "Bash(node --check agent.js)",
-      "Bash(node --check preload.js)"
+      "Bash(node --check preload.js)",
+      "Skill(code-review)",
+      "Skill(code-review:*)",
+      "Bash(git diff *)",
+      "Read(//Users/kavan/.claude/**)",
+      "Bash(HALO_TEST_GRID=/private/tmp/claude-501/-Users-kavan-Desktop-jethacks/21dae129-26cd-47b7-90ed-37e561b88203/scratchpad/grid_before.png npm start)",
+      "Bash(HALO_TEST_GRID=/private/tmp/claude-501/-Users-kavan-Desktop-jethacks/21dae129-26cd-47b7-90ed-37e561b88203/scratchpad/grid_after.png npm start)",
+      "Bash(HALO_TEST_GRID=/private/tmp/claude-501/-Users-kavan-Desktop-jethacks/21dae129-26cd-47b7-90ed-37e561b88203/scratchpad/grid_v2.png npm start)"
     ]
   }
 }

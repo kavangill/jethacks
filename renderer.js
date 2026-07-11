@@ -211,15 +211,58 @@ mic.addEventListener('click', () => {
 // bar; we swap the mic/✕ for a spinner (which doubles as a cancel button).
 const spin = document.getElementById('spin');
 spin.addEventListener('click', () => window.overlay.haloAbort());
+const board = document.getElementById('board');
+const boardContent = document.getElementById('board-content');
 window.overlay.onHaloLoading((on) => {
   document.body.classList.toggle('loading', on);
+  if (on) {
+    // Fresh question → fresh board.
+    boardContent.innerHTML = '';
+    board.classList.remove('has');
+  } else {
+    // Panel heights computed while it was display:none are garbage —
+    // recompute now that it's visible again.
+    redraw();
+  }
+});
+
+// Formula board: the agent streams formulas/calculation steps here while the
+// window is snapped top-centre; each line is echoed into the chat history so
+// the working survives after the board collapses. Math lines arrive as LaTeX
+// and render through KaTeX; plain lines (titles/notes) render as text.
+function mathHtml(text, displayMode) {
+  if (typeof katex === 'undefined') return escapeHtml(text);
+  try {
+    return katex.renderToString(text, { throwOnError: false, displayMode });
+  } catch {
+    return escapeHtml(text);
+  }
+}
+
+window.overlay.onHaloBoard(({ text, highlight, plain }) => {
+  const div = document.createElement('div');
+  div.className = 'bline' + (highlight ? ' hl' : '') + (plain ? ' plain' : '');
+  if (plain) div.textContent = text;
+  else div.innerHTML = mathHtml(text, true);
+  boardContent.appendChild(div);
+  board.classList.add('has');
+  board.scrollTop = board.scrollHeight;
+  const echo = plain ? escapeHtml(text) : mathHtml(text, false);
+  haloLine(`<div class="line bmath${highlight ? ' hl' : ''}">${echo}</div>`);
 });
 
 // ⌥ Option hold-to-talk, driven from main's uiohook key detection. Starting
 // a recording always means main already cancelled/superseded any run in
 // progress (barge-in), so by the time 'listen-start' arrives we're clear to
-// record fresh input.
-window.overlay.onHaloListenStart(() => startRecording('teach'));
+// record fresh input. Reset the local busy flags FIRST: haloBusy is only
+// cleared by an 'idle' status, so pressing ⌥ while the agent was
+// thinking/speaking would otherwise refuse to record and wedge the whole
+// state machine (the "can't ask a second question" bug).
+window.overlay.onHaloListenStart(() => {
+  haloBusy = false;
+  cancelNext = false;
+  startRecording('teach');
+});
 window.overlay.onHaloListenStop(() => stopRecording());
 
 // Escape (or any other explicit cancel) discards the in-progress recording
@@ -270,13 +313,17 @@ function playNext() {
     window.overlay.haloAudioDone();
     return;
   }
+  const clip = audioQueue.shift();
   playing = true;
-  currentAudioEl = new Audio('data:audio/mpeg;base64,' + audioQueue.shift());
+  // Main gates each turn's drawings on its sentence starting — report even
+  // if playback then errors, so the agent loop never hangs on a bad clip.
+  window.overlay.haloAudioPlaying(clip.id);
+  currentAudioEl = new Audio('data:audio/mpeg;base64,' + clip.b64);
   currentAudioEl.onended = currentAudioEl.onerror = () => { playing = false; currentAudioEl = null; playNext(); };
   currentAudioEl.play().catch(() => { playing = false; currentAudioEl = null; playNext(); });
 }
-window.overlay.onHaloAudio((b64) => {
-  audioQueue.push(b64);
+window.overlay.onHaloAudio((clip) => {
+  audioQueue.push(clip);
   playNext();
 });
 

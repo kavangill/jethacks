@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld('overlay', {
   onHaloTranscript: (cb) => ipcRenderer.on('halo-transcript', (_e, t) => cb(t)),
   onHaloLog: (cb) => ipcRenderer.on('halo-log', (_e, line) => cb(line)),
   onHaloError: (cb) => ipcRenderer.on('halo-error', (_e, msg) => cb(msg)),
-  onHaloAudio: (cb) => ipcRenderer.on('halo-audio', (_e, b64) => cb(b64)),
+  onHaloAudio: (cb) => ipcRenderer.on('halo-audio', (_e, clip) => cb(clip)),
 
   // teaching mode (Space-toggled) + rich chat log
   haloTeach: (audioArrayBuffer, mimeType) =>
@@ -31,6 +31,10 @@ contextBridge.exposeInMainWorld('overlay', {
 
   // loading layout (window snapped top-centre while the agent works)
   onHaloLoading: (cb) => ipcRenderer.on('halo-loading', (_e, on) => cb(on)),
+  // formula board lines streamed while the agent works
+  onHaloBoard: (cb) => ipcRenderer.on('halo-board', (_e, d) => cb(d)),
   // TTS playback queue drained — main keeps drawings up until this
   haloAudioDone: () => ipcRenderer.send('halo-audio-done'),
+  // a specific clip started playing — main syncs drawings to this
+  haloAudioPlaying: (id) => ipcRenderer.send('halo-audio-playing', id),
 });
