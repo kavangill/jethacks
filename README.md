@@ -10,9 +10,10 @@
   </a>
 </p>
 
-A lightweight Electron overlay that uses less than 10% of system resources (M1 Macbook Pro)
+A lightweight Electron utility that uses less than 10% of system resources (M1 Macbook Pro)
+It draws on your screen, providing on-screen tutorials & help no matter the scenario
 
-macOS Screen Recording + Accessibility permissions required for full functionality.
+**Please Note:** On macOS, Screen Recording + Accessibility permissions are required for full functionality.
 
 ## Features
 - Voice or text input (hold-to-talk or prompt box)
