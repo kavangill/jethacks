@@ -54,3 +54,9 @@ macOS Screen Recording + Accessibility permissions required for full functionali
 
 ## CRITICAL DISCLAIMER
 - The API key is provided for ***testing purposes only*** 
+
+## Credits
+- Project created by:
+    - Abhiram Vadali
+    - Kavan Gill
+    - Kevin Renjith
