@@ -28,17 +28,14 @@
     window.addEventListener('resize', sizeCanvas);
 
     const COLORS = { ai: '#378ADD', user: '#FFB340' };
-    const LIFE_MS = 1300; // how long a trail segment glows before fading out
+    const LIFE_MS = 1300;
 
-    // AI annotation palette (draw_* tools) — persistent until cleared.
     const SHAPE_COLORS = { red: '#FF453A', blue: '#0A84FF', yellow: '#FFD60A' };
-    // Draw-on times: each shape animates like a hand sketching it — circles
-    // sweep around, arrows grow start-to-tip, rects trace their perimeter.
     const DRAW_MS = { ellipse: 600, rect: 550, line: 450, arrow: 500, text: 300 };
 
     let color = COLORS.ai;
-    let pts = []; // { x, y, t }
-    let shapes = []; // { type, color, ...coords, t } — persistent annotations
+    let pts = [];
+    let shapes = [];
 
     ipcRenderer.on('trail-mode', (_e, mode) => {
       color = COLORS[mode] || COLORS.ai;
@@ -47,24 +44,16 @@
 
     ipcRenderer.on('trail-point', (_e, x, y) => {
       const last = pts[pts.length - 1];
-      // Skip duplicate points so a resting cursor doesn't build a blob.
       if (last && Math.abs(last.x - x) < 1 && Math.abs(last.y - y) < 1) return;
       pts.push({ x, y, t: performance.now() });
       if (pts.length > 600) pts.shift();
     });
 
-    // trail-clear resets the whole overlay (new session); draw-clear only
-    // erases the AI's annotations (the model's clear_drawings tool).
     ipcRenderer.on('trail-clear', () => { pts = []; shapes = []; });
-    // debug-only: opaque backdrop so calibration captures are noise-free
     ipcRenderer.on('trail-bg', (_e, color) => { document.body.style.background = color; });
     ipcRenderer.on('draw-shape', (_e, s) => { shapes.push({ ...s, t: performance.now() }); });
     ipcRenderer.on('draw-clear', () => { shapes = []; });
 
-    // Paint one shape onto any 2d context at draw-on progress e (0..1, eased).
-    // Shared by the live overlay and the screenshot compositor (e = 1 there).
-    // Marker look: shapes and plain lines are thick; arrows and text run
-    // thinner so labels and pointers stay crisp and readable.
     function paintShape(g, s, e) {
       const c = SHAPE_COLORS[s.color] || SHAPE_COLORS.blue;
       g.strokeStyle = c;
@@ -73,7 +62,7 @@
       g.lineJoin = 'round';
       if (s.type === 'text') {
         g.globalAlpha = e;
-        const pop = 0.85 + 0.15 * e; // slight settle-in
+        const pop = 0.85 + 0.15 * e;
         g.font = `600 ${s.size * pop}px "Marker Felt", "Chalkboard SE", sans-serif`;
         g.textAlign = 'center';
         g.textBaseline = 'middle';
@@ -84,13 +73,11 @@
       if (s.type === 'ellipse') {
         g.lineWidth = 7;
         g.beginPath();
-        // Sweep around from the top, like a pen circling the target.
         const start = -Math.PI / 2;
         g.ellipse(s.cx, s.cy, Math.max(1, s.rx), Math.max(1, s.ry), 0, start, start + e * Math.PI * 2);
         g.stroke();
       } else if (s.type === 'rect') {
         g.lineWidth = 7;
-        // Trace the perimeter clockwise from the top-left corner.
         const pts = [
           [s.x, s.y], [s.x + s.w, s.y], [s.x + s.w, s.y + s.h], [s.x, s.y + s.h], [s.x, s.y],
         ];
@@ -118,7 +105,6 @@
         g.stroke();
       } else if (s.type === 'arrow') {
         g.lineWidth = 3.5;
-        // The shaft grows toward the target with the head riding the tip.
         const tx = s.x1 + (s.x2 - s.x1) * e;
         const ty = s.y1 + (s.y2 - s.y1) * e;
         g.beginPath();
@@ -137,7 +123,7 @@
     function drawShape(s, now) {
       const dur = DRAW_MS[s.type] || 500;
       const p = Math.min(1, (now - s.t) / dur);
-      const e = 1 - Math.pow(1 - p, 3); // ease-out: fast start, gentle finish
+      const e = 1 - Math.pow(1 - p, 3);
       ctx.shadowColor = SHAPE_COLORS[s.color] || SHAPE_COLORS.blue;
       ctx.shadowBlur = s.type === 'text' ? 2 : 4;
       paintShape(ctx, s, e);
@@ -154,9 +140,8 @@
       pts = pts.filter((p) => now - p.t < LIFE_MS);
       for (let i = 1; i < pts.length; i++) {
         const a = pts[i], b = pts[i - 1];
-        // Break the stroke across big jumps (cursor teleports, mode changes).
         if (Math.hypot(a.x - b.x, a.y - b.y) > 200) continue;
-        const age = (now - a.t) / LIFE_MS; // 0 fresh → 1 gone
+        const age = (now - a.t) / LIFE_MS;
         ctx.globalAlpha = (1 - age) * 0.9;
         ctx.strokeStyle = color;
         ctx.shadowColor = color;
@@ -172,10 +157,6 @@
     }
     requestAnimationFrame(frame);
 
-    // ---- screenshot annotation service ----------------------------------
-    // Main sends the screenshot + the user's gesture path (already scaled to
-    // image space); we composite the path onto the image and send it back so
-    // Claude can see exactly what the student circled.
     ipcRenderer.on('annotate', (_e, base64, points) => {
       const img = new Image();
       img.onload = () => {
@@ -202,10 +183,6 @@
       img.src = 'data:image/png;base64,' + base64;
     });
 
-    // ---- drawing compositor ----------------------------------------------
-    // Replays the current shape list onto a screenshot so Claude can see
-    // where its own marks landed (the live overlay is capture-protected).
-    // Shapes are in window coords; image = (window + origin) * k.
     ipcRenderer.on('annotate-shapes', (_e, base64, { k, ox, oy }) => {
       const img = new Image();
       img.onload = () => {

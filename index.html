@@ -6,15 +6,14 @@
   <link rel="stylesheet" href="node_modules/katex/dist/katex.min.css" />
   <style>
     :root {
-      /* cadgod palette: island rgb(0.13,0.13,0.15), 10% white border */
       --island-bg: rgb(33, 33, 38);
       --island-border: rgba(255, 255, 255, 0.10);
-      --text: rgba(255, 255, 255, 0.85);   /* labelColor */
-      --muted: rgba(255, 255, 255, 0.55);  /* secondaryLabelColor */
+      --text: rgba(255, 255, 255, 0.85);
+      --muted: rgba(255, 255, 255, 0.55);
       --head: #ffffff;
-      --accent: rgba(255, 255, 255, 0.55); /* white 0.55 marker accent */
-      --teal: #40c8e0;                     /* systemTealColor */
-      --red: #ff453a;                      /* systemRedColor */
+      --accent: rgba(255, 255, 255, 0.55);
+      --teal: #40c8e0;
+      --red: #ff453a;
       --mono: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
     }
 
@@ -26,8 +25,6 @@
       height: 100%;
     }
 
-    /* Bar pinned to the bottom of the fixed-size window; panel grows
-       upward above it. */
     #root {
       display: flex;
       flex-direction: column;
@@ -43,7 +40,6 @@
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
     }
 
-    /* --- output panel ------------------------------------------------ */
     #panel {
       height: 0;
       margin-bottom: 0;
@@ -68,7 +64,6 @@
       border-radius: 3px;
     }
 
-    /* --- markdown (mirrors cadgod renderMarkdown) --------------------- */
     #content {
       font-family: var(--mono);
       font-size: 11.5px;
@@ -96,7 +91,6 @@
     }
     #content b { color: var(--head); }
 
-    /* inline agent screenshots */
     #content .shot {
       display: block;
       max-width: 100%;
@@ -104,7 +98,6 @@
       border: 1px solid rgba(255, 255, 255, 0.14);
       margin: 6px 0;
     }
-    /* Claude's interleaved reasoning */
     #content .thinking {
       color: var(--muted);
       font-style: italic;
@@ -114,7 +107,6 @@
       white-space: pre-wrap;
     }
 
-    /* --- input bar (cadgod input island: 42px, 8px pad, 6px gaps) ----- */
     #bar {
       -webkit-app-region: drag;
       display: flex;
@@ -139,7 +131,6 @@
     input::placeholder { color: var(--muted); }
     input:disabled { color: var(--muted); }
 
-    /* red borderless ✕ — same as cadgod's close button */
     #kill {
       -webkit-app-region: no-drag;
       background: none;
@@ -154,7 +145,6 @@
     }
     #kill:hover { opacity: 0.75; }
 
-    /* --- Halo mic button ---------------------------------------------- */
     #mic {
       -webkit-app-region: no-drag;
       background: none;
@@ -174,7 +164,6 @@
     #mic svg { pointer-events: none; display: block; }
     #mic:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.35); }
 
-    /* recording: red pulse while the button is held */
     #mic.recording {
       color: var(--red);
       border-color: var(--red);
@@ -185,7 +174,6 @@
       50%      { box-shadow: 0 0 0 6px rgba(255, 69, 58, 0); }
     }
 
-    /* busy states: blue */
     #mic.transcribing, #mic.thinking { color: #378add; border-color: #378add; }
     #mic.thinking { animation: micSpin 1s linear infinite; }
     #mic.acting {
@@ -199,7 +187,6 @@
       to   { transform: rotate(360deg); }
     }
 
-    /* --- loading layout (window snapped top-centre, bare bar + spinner) --- */
     #spin {
       -webkit-app-region: no-drag;
       display: none;
@@ -217,12 +204,9 @@
     body.loading #spin { display: block; }
     body.loading #mic, body.loading #kill { display: none; }
     body.loading #panel { display: none; }
-    /* bar rides at the TOP of the window while loading so the board can
-       drop down beneath it */
     body.loading #root { justify-content: flex-start; }
     @keyframes spinTurn { to { transform: rotate(360deg); } }
 
-    /* --- formula board (drops down from the loading bar) ------------------ */
     #board {
       display: none;
       margin-top: 6px;
@@ -259,7 +243,6 @@
       from { opacity: 0; transform: translateY(-5px); }
     }
 
-    /* board lines echoed into the chat log so the working survives the run */
     #content .bmath {
       border-left: 2px solid rgba(255, 214, 10, 0.55);
       background: rgba(255, 214, 10, 0.07);

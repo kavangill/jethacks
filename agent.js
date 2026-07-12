@@ -89,7 +89,6 @@ const TOOLS = [
       required: ['message'],
     },
   },
-  // --- drawing: glowing annotations rendered on a transparent overlay ------
   {
     name: 'draw_ellipse',
     description:
@@ -241,14 +240,7 @@ const EXECUTORS = {
   take_screenshot: async () => 'fresh screenshot attached',
 };
 
-// runAgent drives the loop. emit(event, data) surfaces progress to the UI:
-//   'status'  -> 'thinking' | 'acting'
-//   'log'     -> console-style line for the panel
-//   'board'   -> formula board line
-// speak(text) TTSes narration and resolves when the clip STARTS playing, so
-// each turn's drawings appear in sync with their sentence.
-// context is a short summary of the previous exchange (follow-ups/interrupts).
-// abortState.aborted (set by the Escape kill switch) stops before each step.
+// emit(event,data): status/log/board/shot/thinking to the UI
 async function runAgent(task, { emit, abortState, signal, firstShot, circled, draw, annotate, speak, context }) {
   const client = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY,
@@ -287,16 +279,14 @@ async function runAgent(task, { emit, abortState, signal, firstShot, circled, dr
         { signal }
       );
     } catch (err) {
-      if (abortState.aborted || signal?.aborted) return null; // barge-in cancelled the request
+      if (abortState.aborted || signal?.aborted) return null;
       throw err;
     }
-    if (abortState.aborted) return null; // superseded while the request was in flight
+    if (abortState.aborted) return null;
     messages.push({ role: 'assistant', content: response.content });
 
     const toolUses = response.content.filter((b) => b.type === 'tool_use');
 
-    // Surface Claude's interleaved reasoning text in the chat log (the final
-    // no-tools text is reported separately as the answer, not as thinking).
     if (toolUses.length > 0) {
       for (const block of response.content) {
         if (block.type === 'text' && block.text.trim()) emit('thinking', block.text.trim());
@@ -319,8 +309,6 @@ async function runAgent(task, { emit, abortState, signal, firstShot, circled, dr
 
       let outcome;
       if (tu.name === 'speak') {
-        // Blocks until this clip starts playing, so the drawings that follow
-        // in this batch land on screen with the sentence, not ahead of it.
         outcome = speak ? await speak(tu.input.message) : 'spoken';
       } else if (tu.name === 'board_write') {
         emit('board', {
@@ -345,9 +333,6 @@ async function runAgent(task, { emit, abortState, signal, firstShot, circled, dr
       console.log(`[halo] tool ${tu.name}(${JSON.stringify(tu.input)}) -> ${outcome}`);
       emit('log', `${tu.name} → ${outcome}`);
 
-      // speak/draw/board don't change what Claude can see (drawings are
-      // excluded from captures), so a fresh screenshot after them is wasted
-      // tokens — only re-capture after tools that actually touch the screen.
       if (tu.name === 'speak' || tu.name === 'board_write' || DRAW_TOOLS.has(tu.name)) {
         results.push({
           type: 'tool_result',
@@ -358,8 +343,6 @@ async function runAgent(task, { emit, abortState, signal, firstShot, circled, dr
       }
 
       shot = await captureScreen();
-      // Composite the AI's own drawings onto the shot (they're excluded from
-      // raw captures) so it can verify placement and fix a missed circle.
       if (annotate) shot = await annotate(shot);
       emit('shot', shot.base64);
       results.push({
@@ -372,11 +355,8 @@ async function runAgent(task, { emit, abortState, signal, firstShot, circled, dr
     emit('status', 'thinking');
   }
 
-  // Step cap reached mid-lesson: ask for a closing summary with tools
-  // disabled so the student gets a graceful wrap-up instead of a cutoff.
   if (abortState.aborted) return null;
   try {
-    // Append to the trailing tool_result turn (roles must alternate).
     messages[messages.length - 1].content.push({
       type: 'text',
       text: 'You have reached your pointing-step limit. Give the student your final spoken wrap-up now — plain text, no tools.',
@@ -392,9 +372,7 @@ async function runAgent(task, { emit, abortState, signal, firstShot, circled, dr
       .join(' ')
       .trim();
     if (text) return text;
-  } catch {
-    // fall through to the generic wrap below
-  }
+  } catch {}
   return "That's the guided tour for now — ask me a follow-up if you'd like to go deeper.";
 }
 

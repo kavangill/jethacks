@@ -7,19 +7,13 @@ const kill = document.getElementById('kill');
 const PANEL_MAX = 420;
 const PANEL_PAD = 12; // #scroll vertical padding
 
-// ---------------------------------------------------------------- markdown
-// Line-based renderer mirroring cadgod's renderMarkdown: #/##/### headings,
-// - bullets (→ •), **bold**, `code`, --- rules, _muted_ placeholders, and
-// ▸/● leading markers recolored as accents.
 function escapeHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function renderInline(line) {
   let html = escapeHtml(line);
-  // **bold** — text between ** pairs (same split-on-** approach as cadgod)
   html = html.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
-  // `code`
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   return html;
 }
@@ -45,7 +39,6 @@ function renderMarkdown(md) {
       cls = 'line muted';
     }
 
-    // Leading ▸/● marker glyphs get the accent color.
     let prefix = '';
     if (line.startsWith('▸ ') || line.startsWith('● ')) {
       prefix = `<span class="marker">${line.slice(0, 2)}</span>`;
@@ -57,12 +50,8 @@ function renderMarkdown(md) {
   return out.join('');
 }
 
-// ---------------------------------------------------------------- panel
-// The OS window never resizes (that's what snapped) — the panel's height
-// animates with CSS inside the fixed transparent window, growing upward
-// since the bar is pinned to the bottom.
-let history = ''; // rendered HTML of past turns
-let currentMd = ''; // streaming markdown of the active turn
+let history = '';
+let currentMd = '';
 
 function redraw() {
   content.innerHTML = history + renderMarkdown(currentMd);
@@ -114,12 +103,10 @@ window.overlay.onError((msg) => {
   promptInput.focus();
 });
 
-// ---------------------------------------------------------------- input
 promptInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !generating) {
     const value = promptInput.value.trim();
     if (!value) return;
-    // "/do <task>" runs the Halo cursor agent from text (mic-less fallback).
     if (value.startsWith('/do ')) {
       promptInput.value = '';
       window.overlay.haloTask(value.slice(4).trim());
@@ -134,21 +121,14 @@ promptInput.addEventListener('keydown', (e) => {
 
 kill.addEventListener('click', () => window.overlay.quit());
 
-// ---------------------------------------------------------------- Halo voice
-// Hold the mic button → record → release → STT → agent drives the cursor →
-// TTS speaks the result. All heavy lifting is in the main process; this side
-// only records audio and renders status.
 const mic = document.getElementById('mic');
 
 let recorder = null;
 let recChunks = [];
 let haloBusy = false;
-let cancelNext = false; // set by onHaloListenCancel: discard the next recording, don't send it
+let cancelNext = false;
 let currentStatus = 'idle';
 
-// Clicking the mic while the agent is thinking/acting/speaking cancels the
-// whole run instead of starting a new recording (mousedown already guards
-// against starting a second recording while haloBusy is true).
 const BUSY_STATES = ['thinking', 'acting', 'transcribing', 'speaking'];
 
 function setMicState(state) {
@@ -161,8 +141,6 @@ function haloLine(html) {
   redraw();
 }
 
-// mode: 'voice' (hold mic button) or 'teach' (Space toggle — main tracks the
-// gesture trail and annotates the screenshot with what the student circled).
 async function startRecording(mode) {
   if (haloBusy || recorder) return;
   try {
@@ -174,8 +152,8 @@ async function startRecording(mode) {
       stream.getTracks().forEach((t) => t.stop());
       const blob = new Blob(recChunks, { type: 'audio/webm' });
       recorder = null;
-      if (cancelNext) { cancelNext = false; setMicState('idle'); return; } // Escape cancelled it
-      if (blob.size < 2000) { setMicState('idle'); return; } // accidental tap
+      if (cancelNext) { cancelNext = false; setMicState('idle'); return; }
+      if (blob.size < 2000) { setMicState('idle'); return; }
       haloBusy = true;
       setMicState('transcribing');
       const send = mode === 'teach' ? window.overlay.haloTeach : window.overlay.haloVoice;
@@ -201,14 +179,10 @@ mic.addEventListener('mousedown', () => startRecording('voice'));
 mic.addEventListener('mouseup', stopRecording);
 mic.addEventListener('mouseleave', stopRecording);
 
-// A click while the agent is busy (not recording) cancels the run instead
-// of starting a new one — "stop prompt, end thinking".
 mic.addEventListener('click', () => {
   if (BUSY_STATES.includes(currentStatus)) window.overlay.haloAbort();
 });
 
-// Loading layout: main snaps the window top-centre and collapses it to the
-// bar; we swap the mic/✕ for a spinner (which doubles as a cancel button).
 const spin = document.getElementById('spin');
 spin.addEventListener('click', () => window.overlay.haloAbort());
 const board = document.getElementById('board');
@@ -216,20 +190,13 @@ const boardContent = document.getElementById('board-content');
 window.overlay.onHaloLoading((on) => {
   document.body.classList.toggle('loading', on);
   if (on) {
-    // Fresh question → fresh board.
     boardContent.innerHTML = '';
     board.classList.remove('has');
   } else {
-    // Panel heights computed while it was display:none are garbage —
-    // recompute now that it's visible again.
     redraw();
   }
 });
 
-// Formula board: the agent streams formulas/calculation steps here while the
-// window is snapped top-centre; each line is echoed into the chat history so
-// the working survives after the board collapses. Math lines arrive as LaTeX
-// and render through KaTeX; plain lines (titles/notes) render as text.
 function mathHtml(text, displayMode) {
   if (typeof katex === 'undefined') return escapeHtml(text);
   try {
@@ -251,13 +218,6 @@ window.overlay.onHaloBoard(({ text, highlight, plain }) => {
   haloLine(`<div class="line bmath${highlight ? ' hl' : ''}">${echo}</div>`);
 });
 
-// ⌥ Option hold-to-talk, driven from main's uiohook key detection. Starting
-// a recording always means main already cancelled/superseded any run in
-// progress (barge-in), so by the time 'listen-start' arrives we're clear to
-// record fresh input. Reset the local busy flags FIRST: haloBusy is only
-// cleared by an 'idle' status, so pressing ⌥ while the agent was
-// thinking/speaking would otherwise refuse to record and wedge the whole
-// state machine (the "can't ask a second question" bug).
 window.overlay.onHaloListenStart(() => {
   haloBusy = false;
   cancelNext = false;
@@ -265,8 +225,6 @@ window.overlay.onHaloListenStart(() => {
 });
 window.overlay.onHaloListenStop(() => stopRecording());
 
-// Escape (or any other explicit cancel) discards the in-progress recording
-// instead of transcribing it.
 window.overlay.onHaloListenCancel(() => {
   cancelNext = true;
   stopRecording();
@@ -289,34 +247,26 @@ window.overlay.onHaloError((msg) => {
   haloLine(`<div class="line error">✗ ${escapeHtml(msg)}</div>`);
 });
 
-// Screenshots the agent takes, shown inline in the chat log.
 window.overlay.onHaloShot((b64) => {
   haloLine(`<img class="shot" src="data:image/png;base64,${b64}" />`);
-  // Images size in after decode; recompute the panel height once they have.
   setTimeout(redraw, 150);
 });
 
-// Claude's interleaved reasoning while it works.
 window.overlay.onHaloThinking((text) => {
   haloLine(`<div class="line thinking">${escapeHtml(text)}</div>`);
 });
 
-// TTS mp3s from main, played in order.
 const audioQueue = [];
 let playing = false;
 let currentAudioEl = null;
 function playNext() {
   if (playing) return;
   if (audioQueue.length === 0) {
-    // Queue drained — tell main so it can fade the trail/drawings and go
-    // idle only after the student has actually heard the whole answer.
     window.overlay.haloAudioDone();
     return;
   }
   const clip = audioQueue.shift();
   playing = true;
-  // Main gates each turn's drawings on its sentence starting — report even
-  // if playback then errors, so the agent loop never hangs on a bad clip.
   window.overlay.haloAudioPlaying(clip.id);
   currentAudioEl = new Audio('data:audio/mpeg;base64,' + clip.b64);
   currentAudioEl.onended = currentAudioEl.onerror = () => { playing = false; currentAudioEl = null; playNext(); };
@@ -327,8 +277,6 @@ window.overlay.onHaloAudio((clip) => {
   playNext();
 });
 
-// Barge-in / Escape / cancel: wipe anything queued or currently playing so
-// no stale speech continues after the student interrupts.
 window.overlay.onHaloAudioStop(() => {
   audioQueue.length = 0;
   playing = false;
@@ -340,9 +288,6 @@ window.overlay.onHaloAudioStop(() => {
   }
 });
 
-// ---------------------------------------------------------------- click-through
-// Most of the fixed-size window is empty transparent space; forward mouse
-// events to whatever app is underneath unless the cursor is over an island.
 let ignoring = true;
 window.addEventListener('mousemove', (e) => {
   const el = document.elementFromPoint(e.clientX, e.clientY);
