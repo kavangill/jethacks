@@ -11,7 +11,7 @@
 </p>
 
 A lightweight Electron utility that uses less than 10% of system resources (M1 Macbook Pro) \
-It draws on your screen, providing on-screen tutorials & help no matter the scenario
+It draws on your screen, providing on-screen tutorials & help, no matter the scenario.
 
 **Please Note:** On macOS, Screen Recording + Accessibility permissions are required for full functionality.
 
