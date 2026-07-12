@@ -19,7 +19,7 @@ It draws on your screen, providing on-screen tutorials & help, no matter the sce
 - Voice or text input (hold-to-talk or prompt box)
 - Screen capture used as context for the AI
 - Streaming model output rendered live in a compact panel
-- Synchronized Text To Speech and on-screen neon drawings
+- Synchronized Text to Speech and on-screen neon drawings
 - Optional real cursor automation for demos
 - Small formula board that renders LaTeX with an onboard compiler
 
@@ -28,7 +28,7 @@ It draws on your screen, providing on-screen tutorials & help, no matter the sce
 2. main.js captures a scaled screenshot and calls the agent loop (agent.js).
 3. agent.js sends the screenshot + user prompt to Anthropic, receives interleaved tool commands and text, and interprets them.
 4. Drawing commands are rendered by the trail overlay (trail.html). Action commands are executed via nut-js (actions.js).
-5. TTS clips are delivered to the renderer for playback so speech and drawings remain synchronized.
+5. Text to Speech clips are delivered to the renderer for playback so speech and drawings remain synchronized.
 
 # File Descriptions
 
@@ -36,11 +36,11 @@ It draws on your screen, providing on-screen tutorials & help, no matter the sce
 - `trail.html` -> Full-screen transparent canvas for glowing cursor trails and on-screen annotation rendering driven by IPC.  
 - `main.js` -> Electron main process: creates overlay & trail windows, manages permissions/global hooks, coordinates runs, and mediates IPC.  
 - `preload.js` -> Secure IPC bridge exposing a small overlay API (haloVoice, haloTask, haloTeach, setIgnoreMouse, etc.) to the renderer.  
-- `renderer.js` -> Front-end logic: streaming markdown rendering, audio recording, TTS playback queue, UI state, and panel/board updates.  
+- `renderer.js` -> Front-end logic: streaming markdown rendering, audio recording, Text to Speech playback queue, UI state, and panel/board updates.  
 - `agent.js` -> AI agent loop: builds screenshot+prompt messages for Anthropic, interprets interleaved tool_use responses, and sequences tools and narration.  
 - `actions.js` -> Mouse/keyboard executor using nut-js: move, click, drag, type, press combos, and scroll with demo-friendly timings.  
 - `screen.js` -> Screenshot and coordinate utilities: capture via desktopCapturer or screencapture CLI and map image pixels to logical screen coordinates.  
-- `voice.js` -> Speech helpers exposing transcription (STT) and text-to-speech (TTS) functions used by main and the agent.  
+- `voice.js` -> Speech to Text and Text to Speech functions used by main.js and the agent.  
 - `test-cursor.js` -> Small cursor and calibration helpers for verifying trail, coordinate mapping, and grid tests.
 
 ## How to Use
