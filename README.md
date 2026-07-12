@@ -14,6 +14,8 @@ A lightweight Electron utility that uses less than 10% of system resources (M1 M
 It draws on your screen, providing on-screen tutorials & help, no matter the scenario.
 
 **Please Note:** On macOS, Screen Recording + Accessibility permissions are required for full functionality.
+**Go to halo.kavang.com to download the software and try it yourselfs! Again make sure to enable all permissions.**
+**Please DM on discord if any issues occur: kavan010**
 
 ## Features
 - Voice or text input (hold-to-talk or prompt box)
