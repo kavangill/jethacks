@@ -3,7 +3,7 @@
 
 set -e
 
-echo "Installing dependencies for Halo..."
+echo "Installing dependencies for ..."
 
 if ! command -v node &> /dev/null; then
     echo "Node.js is not installed."

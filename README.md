@@ -31,17 +31,23 @@ macOS Screen Recording + Accessibility permissions required for full functionali
 
 # File Descriptions
 
-- `index.html` — Main overlay HTML: the prompt bar, mic button, panel, formula board, and links to renderer scripts and KaTeX.  
-- `trail.html` — Full-screen transparent canvas for glowing cursor trails and on-screen annotation rendering driven by IPC.  
-- `main.js` — Electron main process: creates overlay & trail windows, manages permissions/global hooks, coordinates runs, and mediates IPC.  
-- `preload.js` — Secure IPC bridge exposing a small overlay API (haloVoice, haloTask, haloTeach, setIgnoreMouse, etc.) to the renderer.  
-- `renderer.js` — Front-end logic: streaming markdown rendering, audio recording, TTS playback queue, UI state, and panel/board updates.  
-- `agent.js` — AI agent loop: builds screenshot+prompt messages for Anthropic, interprets interleaved tool_use responses, and sequences tools and narration.  
-- `actions.js` — Mouse/keyboard executor using nut-js: move, click, drag, type, press combos, and scroll with demo-friendly timings.  
-- `screen.js` — Screenshot and coordinate utilities: capture via desktopCapturer or screencapture CLI and map image pixels to logical screen coordinates.  
-- `voice.js` — Speech helpers exposing transcription (STT) and text-to-speech (TTS) functions used by main and the agent.  
-- `test-cursor.js` — Small cursor and calibration helpers for verifying trail, coordinate mapping, and grid tests.
+- `index.html` -> Main overlay HTML: the prompt bar, mic button, panel, formula board, and links to renderer scripts and KaTeX.  
+- `trail.html` -> Full-screen transparent canvas for glowing cursor trails and on-screen annotation rendering driven by IPC.  
+- `main.js` -> Electron main process: creates overlay & trail windows, manages permissions/global hooks, coordinates runs, and mediates IPC.  
+- `preload.js` -> Secure IPC bridge exposing a small overlay API (haloVoice, haloTask, haloTeach, setIgnoreMouse, etc.) to the renderer.  
+- `renderer.js` -> Front-end logic: streaming markdown rendering, audio recording, TTS playback queue, UI state, and panel/board updates.  
+- `agent.js` -> AI agent loop: builds screenshot+prompt messages for Anthropic, interprets interleaved tool_use responses, and sequences tools and narration.  
+- `actions.js` -> Mouse/keyboard executor using nut-js: move, click, drag, type, press combos, and scroll with demo-friendly timings.  
+- `screen.js` -> Screenshot and coordinate utilities: capture via desktopCapturer or screencapture CLI and map image pixels to logical screen coordinates.  
+- `voice.js` -> Speech helpers exposing transcription (STT) and text-to-speech (TTS) functions used by main and the agent.  
+- `test-cursor.js` -> Small cursor and calibration helpers for verifying trail, coordinate mapping, and grid tests.
 
 ## How to Use
 - Install npm & Node.js
-- Run the install script that corresponds to your Operating System (zsh for Mac OS X, bat for Windows)
+- Run the install script that corresponds to your Operating System (.zsh for Mac OS X, .bat for Windows)
+
+- One could ask Halo to explain anything, using the screen as a canvas, like so:
+    - Press and hold the Option Key (⌥) to talk to Halo, asking it any question
+        - __For Example:__ Explain the Pythagorean Theorem
+    - It would then draw a right triangle on the screen, and explain the theorem
+    - One can interrupt Halo at any time as well 
