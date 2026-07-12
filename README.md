@@ -51,3 +51,6 @@ macOS Screen Recording + Accessibility permissions required for full functionali
         - __For Example:__ Explain the Pythagorean Theorem
     - It would then draw a right triangle on the screen, and explain the theorem
     - One can interrupt Halo at any time as well 
+
+## CRITICAL DISCLAIMER
+- The API key is provided for ***testing purposes only*** 
