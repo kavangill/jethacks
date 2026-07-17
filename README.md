@@ -15,6 +15,7 @@ It draws on your screen, providing on-screen tutorials & help, no matter the sce
 
 **Please Note:** On macOS, Screen Recording + Accessibility permissions are required for full functionality.
 
+** DISCLAIMER: ALL API KEYS AND ASSETS USED IN THIS PROJECT HAVE BEEN DELETED, YOU MAY USE THIS, BUT MIGHT HAVE TO USE YOUR OWN ANTHROPIC AND ELEVENLABS API'S**
 
 **Go to halo.kavang.com to download the software and try it yourselfs! Again make sure to enable all permissions.**
 **Please DM on discord if any issues occur: kavan010**
